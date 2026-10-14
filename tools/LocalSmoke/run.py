@@ -216,13 +216,21 @@ def main() -> int:
         report["checks"]["disposableExcel"] = {"processId": pid, "unsaved": str(workbook.Path) == ""}
 
         if not args.skip_vsto:
-            application.COMAddIns.Update()
+            startup = {"registered": False, "connectedAutomatically": False}
+            report["checks"]["vstoStartup"] = startup
             report["checks"]["registeredAddins"] = [str(application.COMAddIns.Item(i).ProgId)
                                                     for i in range(1, application.COMAddIns.Count + 1)]
-            addin = application.COMAddIns.Item("Aperture.Excel")
-            addin.Connect = True
-            if not addin.Connect:
-                raise RuntimeError("Aperture.Excel COMAddIn did not connect.")
+            registered_id = next((value for value in report["checks"]["registeredAddins"]
+                                  if value.casefold() == "aperture.excel"), None)
+            recovery = ("Rebuild the add-in with scripts/build.ps1, then start a new normal Excel process "
+                        "and rerun the smoke. This test does not repair registration or force-connect add-ins.")
+            if registered_id is None:
+                raise RuntimeError("Aperture.Excel was missing from COMAddIns after normal Excel startup. " + recovery)
+            startup["registered"] = True
+            addin = application.COMAddIns.Item(registered_id)
+            startup["connectedAutomatically"] = bool(addin.Connect)
+            if not startup["connectedAutomatically"]:
+                raise RuntimeError("Aperture.Excel did not connect automatically during normal Excel startup. " + recovery)
             automation = addin.Object
             if automation is None:
                 raise RuntimeError("VSTO loaded without its diagnostics automation service.")
@@ -232,7 +240,7 @@ def main() -> int:
             assert status.get("loaded") is True, status
             assert status.get("paneCount", 0) >= 1, status
             assert status.get("excelProcessId") == pid, status
-            print("VSTO connected and task pane created.", flush=True)
+            print("VSTO connected automatically and task pane created.", flush=True)
 
         # The captured workbook must not follow ActiveWorkbook. Both books and
         # their entire process belong to this test, so no user workbook is used.

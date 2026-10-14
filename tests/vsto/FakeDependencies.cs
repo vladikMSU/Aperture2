@@ -34,6 +34,8 @@ namespace Aperture.Runtime
         public TaskCompletionSource<bool> PromptGate;
         public TaskCompletionSource<bool> AbortGate;
         public bool Disposed;
+        public string PromptDisposition = "started";
+        public bool StateStreaming;
         public bool IsRunning { get { return !Disposed; } }
 
         public event EventHandler<PiEvent> EventReceived;
@@ -46,6 +48,11 @@ namespace Aperture.Runtime
         public void EmitDiagnostic(string message)
         {
             StandardError?.Invoke(this, new PiDiagnosticEventArgs { Message = message });
+        }
+        public Action CaptureEventDelivery(JObject json)
+        {
+            var handlers = EventReceived;
+            return () => handlers?.Invoke(this, new PiEvent { Type = (string)json["type"], Json = json });
         }
 
         public static Task<PiSession> StartAsync(object options, ExcelTarget target, CancellationToken cancellation)
@@ -61,14 +68,14 @@ namespace Aperture.Runtime
             LastPromptThreadId = Thread.CurrentThread.ManagedThreadId;
             Prompts++;
             if (PromptGate != null) await PromptGate.Task.ConfigureAwait(false);
-            return JObject.Parse("{success:true,data:{disposition:'started'}}");
+            return new JObject { ["success"] = true, ["data"] = new JObject { ["disposition"] = PromptDisposition } };
         }
         public async Task<JObject> AbortAsync()
         {
             if (AbortGate != null) await AbortGate.Task.ConfigureAwait(false);
             return JObject.Parse("{success:true}");
         }
-        public Task<JObject> GetStateAsync() { return Task.FromResult(JObject.Parse("{data:{isStreaming:false}}")); }
+        public Task<JObject> GetStateAsync() { return Task.FromResult(new JObject { ["data"] = new JObject { ["isStreaming"] = StateStreaming } }); }
         public Task StopAsync() { return StopGate == null ? Task.CompletedTask : StopGate.Task; }
         public void Dispose() { Disposed = true; }
     }
@@ -88,8 +95,11 @@ namespace Aperture.Excel
     {
         private readonly int ownerThread = Thread.CurrentThread.ManagedThreadId;
         internal string BindingText, StatusText;
-        internal bool Busy, CanStop, PromptCleared;
+        internal string LastAssistantReplacement;
+        internal int AssistantEndCount;
+        internal bool Busy, CanStop, PromptCleared, StatusIsError;
         internal readonly List<string> Transcript = new List<string>();
+        internal readonly List<JObject> Activity = new List<JObject>();
         internal event EventHandler<ChatPaneCommandEventArgs> Command;
         internal bool IsReady { get { return true; } }
         internal string InitializationError { get { return null; } }
@@ -102,12 +112,14 @@ namespace Aperture.Excel
         }
 
         internal void SetBinding(string text) { VerifyThread(); BindingText = text; }
-        internal void SetStatus(string text, bool error) { VerifyThread(); StatusText = text; }
+        internal void SetStatus(string text, bool error) { VerifyThread(); StatusText = text; StatusIsError = error; }
         internal void SetBusy(bool busy, bool canStop = true) { VerifyThread(); Busy = busy; CanStop = canStop; }
         internal void AppendMessage(string who, string text) { VerifyThread(); Transcript.Add(who + ": " + text); }
         internal void AppendAssistant(string text) { VerifyThread(); Transcript.Add(text); }
-        internal void EndAssistant() { VerifyThread(); }
-        internal void ClearTranscript() { VerifyThread(); Transcript.Clear(); }
+        internal void SetAssistantText(string text) { VerifyThread(); LastAssistantReplacement = text; }
+        internal void EndAssistant() { VerifyThread(); AssistantEndCount++; }
+        internal void ApplyActivity(JObject rawPiEvent) { VerifyThread(); Activity.Add((JObject)rawPiEvent.DeepClone()); }
+        internal void ClearTranscript() { VerifyThread(); Transcript.Clear(); Activity.Clear(); }
         internal void ClearPrompt() { VerifyThread(); PromptCleared = true; }
         internal void EmitCommand(string command, string text = null)
         {
@@ -119,11 +131,13 @@ namespace Aperture.Excel
     internal sealed class WorkbookBinding
     {
         private readonly int uiThreadId = Thread.CurrentThread.ManagedThreadId;
+        internal string ValidationFailure;
         internal Aperture.Runtime.ExcelTarget Target = new Aperture.Runtime.ExcelTarget();
         internal void Validate()
         {
             if (Thread.CurrentThread.ManagedThreadId != uiThreadId)
                 throw new InvalidOperationException("Workbook validation left the owning UI thread.");
+            if (ValidationFailure != null) throw new InvalidOperationException(ValidationFailure);
         }
     }
 

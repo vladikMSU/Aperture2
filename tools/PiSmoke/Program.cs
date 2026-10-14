@@ -84,6 +84,7 @@ internal static class Program
         var starts = new Dictionary<string, JObject>();
         var completed = new List<string>();
         var errors = new List<string>();
+        var eventCounts = new Dictionary<string, int>();
         JObject observedTarget = null, observedRange = null;
         string finalText = "";
         bool aborted = false;
@@ -94,6 +95,12 @@ internal static class Program
             {
                 try
                 {
+                    string eventKey = e.Type == "message_update"
+                        ? "message_update." + ((string)e.Json["assistantMessageEvent"]?["type"] ?? "unknown")
+                        : e.Type;
+                    int count;
+                    eventCounts.TryGetValue(eventKey, out count);
+                    eventCounts[eventKey] = count + 1;
                     if (e.Type == "tool_execution_start")
                     {
                         string name = (string)e.Json["toolName"] ?? "";
@@ -198,6 +205,7 @@ internal static class Program
                 ["ok"] = errors.Count == 0, ["provider"] = "openrouter", ["model"] = "openrouter/free",
                 ["modelRequestMade"] = true, ["agentSettled"] = settled.Task.Status == TaskStatus.RanToCompletion,
                 ["elapsedMs"] = watch.ElapsedMilliseconds, ["completedTools"] = new JArray(completed),
+                ["eventCounts"] = JObject.FromObject(eventCounts),
                 ["computedB1"] = observedRange?["values"]?[0]?[1], ["formulaB1"] = observedRange?["formulas"]?[0]?[1],
                 ["assistantText"] = finalText, ["errors"] = new JArray(errors.Distinct())
             };

@@ -160,7 +160,13 @@ namespace Aperture.Excel
         internal void SetBusy(bool busy, bool canStop = true) { Enqueue(new JObject { ["type"] = "busy", ["busy"] = busy, ["canStop"] = canStop }); }
         internal void AppendMessage(string who, string text) { Enqueue(new JObject { ["type"] = "message", ["who"] = who, ["text"] = text }); }
         internal void AppendAssistant(string text) { Enqueue(new JObject { ["type"] = "assistant_delta", ["text"] = text }); }
+        internal void SetAssistantText(string text) { Enqueue(new JObject { ["type"] = "assistant_replace", ["text"] = text }); }
         internal void EndAssistant() { Enqueue(new JObject { ["type"] = "assistant_end" }); }
+        internal void ApplyActivity(JObject rawPiEvent)
+        {
+            if (rawPiEvent != null)
+                Enqueue(new JObject { ["type"] = "activity", ["event"] = rawPiEvent.DeepClone() });
+        }
         internal void ClearTranscript() { Enqueue(new JObject { ["type"] = "clear_transcript" }); }
         internal void ClearPrompt() { Enqueue(new JObject { ["type"] = "clear_prompt" }); }
 

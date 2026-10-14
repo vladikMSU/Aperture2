@@ -20,7 +20,9 @@ namespace Aperture.Excel
         private PaneSettings settings;
         private PiSession session;
         private bool busy;
-        private bool assistantStreaming;
+        private string runError;
+        private bool runStopped;
+        private bool activityOwned;
         private volatile bool disposed;
         private bool transitioning;
         private int operationVersion;
@@ -74,7 +76,7 @@ namespace Aperture.Excel
                 catch (Exception ex)
                 {
                     Diagnostics.Write("pane_command_failed", ex.GetType().Name);
-                    await OnUiAsync(() => { SetBusy(false); SetStatus(ex.Message, true); });
+                    await OnUiAsync(() => { EndActivity("error"); SetBusy(false); SetStatus(ex.Message, true); });
                 }
             }));
         }
@@ -142,26 +144,46 @@ namespace Aperture.Excel
                     finally { if (!installed) started.Dispose(); }
                     if (!installed) { pendingStart.Token.ThrowIfCancellationRequested(); return; }
                 }
-                Task submittedPrompt = null;
+                Task<JObject> submittedPrompt = null;
+                PiSession promptSession = null;
                 await OnUiAsync(() =>
                 {
                     if (!IsCurrentOperation(operation)) return;
                     pendingStart.Token.ThrowIfCancellationRequested();
                     binding.Validate();
+                    runError = null;
+                    runStopped = false;
                     view.AppendMessage("Вы", text);
+                    activityOwned = true;
                     view.ClearPrompt();
                     SetStatus("Думаю…");
                     // Admit the async RPC write before a subsequent UI Stop command.
                     // Only initiation occurs here; all network/process waiting stays async.
-                    submittedPrompt = session.SendPromptAsync(text);
+                    promptSession = session;
+                    submittedPrompt = promptSession.SendPromptAsync(text);
                 });
-                if (submittedPrompt != null) await submittedPrompt.ConfigureAwait(false);
+                if (submittedPrompt != null)
+                {
+                    var response = await submittedPrompt.ConfigureAwait(false);
+                    // Extension commands such as /mcp are handled without an agent run,
+                    // so Pi will not emit agent_settled for their completion.
+                    if ((string)response["data"]?["disposition"] == "handled")
+                    {
+                        var state = await promptSession.GetStateAsync().ConfigureAwait(false);
+                        await OnUiAsync(() =>
+                        {
+                            if (!IsCurrentOperation(operation) || !ReferenceEquals(promptSession, session)) return;
+                            if ((bool?)state["data"]?["isStreaming"] == false)
+                            { EndActivity("done"); SetBusy(false); SetStatus("Команда выполнена"); }
+                        });
+                    }
+                }
             }
             catch (OperationCanceledException)
             {
                 await OnUiAsync(() =>
                 {
-                    if (IsCurrentOperation(operation)) { SetBusy(false); SetStatus("Запуск отменён · запрос не отправлен"); }
+                    if (IsCurrentOperation(operation)) { EndActivity("stopped"); SetBusy(false); SetStatus("Запуск отменён · запрос не отправлен"); }
                 });
             }
             catch (Exception ex)
@@ -175,7 +197,7 @@ namespace Aperture.Excel
                         SetStatus("Статус запроса неизвестен · остановите агента перед повтором", true);
                         view.SetBusy(true, true);
                     }
-                    else { SetStatus("Не удалось выполнить запрос", true); SetBusy(false); }
+                    else { runError = ex.Message; EndActivity("error"); SetStatus("Не удалось выполнить запрос", true); SetBusy(false); }
                 });
                 Diagnostics.Write("request_failed", ex.GetType().Name);
             }
@@ -203,7 +225,7 @@ namespace Aperture.Excel
                 {
                     if (!IsCurrentOperation(operation) || !ReferenceEquals(current, session)) return;
                     if ((bool?)state["data"]?["isStreaming"] == false)
-                    { view.EndAssistant(); assistantStreaming = false; SetBusy(false); SetStatus("Ответ остановлен"); }
+                    { EndActivity("stopped"); SetBusy(false); SetStatus("Ответ остановлен"); }
                 });
             }
             catch (Exception ex)
@@ -212,7 +234,7 @@ namespace Aperture.Excel
                 {
                     if (!IsCurrentOperation(operation) || !ReferenceEquals(current, session)) return;
                     view.AppendMessage("Ошибка остановки", ex.Message);
-                    if (!current.IsRunning) SetBusy(false);
+                    if (!current.IsRunning) { EndActivity("error"); SetBusy(false); SetStatus("Агент остановлен с ошибкой", true); }
                     else { view.SetBusy(true, true); SetStatus("Остановка не подтверждена · дождитесь завершения", true); }
                 });
             }
@@ -229,7 +251,6 @@ namespace Aperture.Excel
                 {
                     if (!IsCurrentOperation(operation)) return;
                     TryCaptureWorkbook();
-                    assistantStreaming = false;
                     if (binding != null) view.AppendMessage("Система", "Книга привязана. Начинаем отдельную сессию.");
                 });
             }
@@ -248,7 +269,6 @@ namespace Aperture.Excel
                 {
                     if (!IsCurrentOperation(operation)) return;
                     view.ClearTranscript();
-                    assistantStreaming = false;
                     SetStatus("Готова к новому запросу");
                 });
             }
@@ -293,43 +313,104 @@ namespace Aperture.Excel
             {
                 if (!ReferenceEquals(sender, session)) return;
                 var json = args.Json;
+                if (IsActivityEvent(args.Type, json)) view.ApplyActivity(json);
                 if (args.Type == "message_update")
                 {
                     var update = json["assistantMessageEvent"];
                     if ((string)update?["type"] == "text_delta")
-                    { view.AppendAssistant((string)update["delta"]); assistantStreaming = true; }
+                    { view.AppendAssistant((string)update["delta"]); }
                 }
                 else if (args.Type == "message_end")
                 {
                     var message = json["message"];
                     if ((string)message?["role"] == "assistant")
                     {
-                        if (!assistantStreaming && message["content"] is JArray parts)
+                        var finalText = String.Empty;
+                        if (message["content"] is JArray parts)
                             foreach (var part in parts)
-                                if ((string)part["type"] == "text") view.AppendAssistant((string)part["text"]);
+                                if ((string)part["type"] == "text") finalText += (string)part["text"];
+                        // The RPC stream is delta-only; the final message is authoritative
+                        // even when a provider's earlier deltas were incomplete.
+                        view.SetAssistantText(finalText);
                         view.EndAssistant();
-                        assistantStreaming = false;
                         var error = (string)message["errorMessage"];
-                        if (!String.IsNullOrWhiteSpace(error)) view.AppendMessage("Ошибка", error);
+                        var stopReason = (string)message["stopReason"];
+                        if (stopReason == "aborted")
+                        {
+                            runStopped = true;
+                            SetStatus("Ответ остановлен");
+                        }
+                        else if (stopReason == "error" || !String.IsNullOrWhiteSpace(error))
+                        {
+                            runError = String.IsNullOrWhiteSpace(error) ? "Провайдер вернул ошибку" : error;
+                            view.AppendMessage("Ошибка", runError);
+                            SetStatus("Ошибка ответа · ожидаю завершения или повтора", true);
+                        }
+                        else
+                        {
+                            // Pi can retry a failed provider response within the same run.
+                            // The latest successful assistant response supersedes that failure.
+                            runError = null;
+                            runStopped = false;
+                        }
                     }
                 }
                 else if (args.Type == "tool_execution_start")
                 {
                     view.EndAssistant();
-                    assistantStreaming = false;
-                    view.AppendMessage("Инструмент", (string)json["toolName"] ?? "Excel");
                     SetStatus("Работаю с книгой…");
                 }
                 else if (args.Type == "tool_execution_end")
                 {
-                    if ((bool?)json["isError"] == true) view.AppendMessage("Инструмент", "Операция вернула ошибку. Агент получил подробности.");
                     SetStatus("Обрабатываю результат…");
                 }
+                else if (args.Type == "auto_retry_start")
+                { SetStatus("Провайдер недоступен · Pi повторяет запрос…"); }
+                else if (args.Type == "auto_retry_end" && (bool?)json["success"] == false)
+                {
+                    var error = (string)json["finalError"];
+                    if (!String.IsNullOrWhiteSpace(error)) runError = error;
+                }
                 else if (args.Type == "agent_settled")
-                { view.EndAssistant(); assistantStreaming = false; SetBusy(false); SetStatus("Готово"); }
+                {
+                    view.EndAssistant(); SetBusy(false);
+                    if ((bool?)json["aborted"] == true || runStopped)
+                    { EndActivity("stopped"); SetStatus("Ответ остановлен"); }
+                    else if (!String.IsNullOrWhiteSpace(runError))
+                    { EndActivity("error"); SetStatus("Запрос завершился ошибкой", true); }
+                    else { activityOwned = false; SetStatus("Готово"); }
+                }
                 else if (args.Type == "process_exit" || args.Type == "error")
-                { view.EndAssistant(); assistantStreaming = false; SetBusy(false); SetStatus("Агент остановлен или вернул ошибку", true); }
+                { runError = "Агент остановлен или вернул ошибку"; EndActivity("error"); SetBusy(false); SetStatus(runError, true); }
             });
+        }
+
+        private static bool IsActivityEvent(string type, JObject json)
+        {
+            switch (type)
+            {
+                case "agent_start": case "agent_end": case "turn_start": case "turn_end":
+                case "message_start": case "message_end":
+                case "tool_execution_start": case "tool_execution_update": case "tool_execution_end":
+                case "auto_retry_start": case "auto_retry_end":
+                case "agent_settled": case "process_exit": case "error": return true;
+                case "message_update":
+                    var update = (string)json["assistantMessageEvent"]?["type"];
+                    return update == "thinking_start" || update == "thinking_delta" || update == "thinking_end" ||
+                        update == "toolcall_start" || update == "toolcall_delta" || update == "toolcall_end";
+                default: return false;
+            }
+        }
+
+        private void EndActivity(string status)
+        {
+            // Preflight/startup errors and idle chat transitions do not own the
+            // previous completed activity card. Only a submitted user turn does.
+            if (!activityOwned) return;
+            view.EndAssistant();
+            if (status == "stopped") runStopped = true;
+            view.ApplyActivity(new JObject { ["type"] = "aperture_run_end", ["status"] = status });
+            activityOwned = false;
         }
 
         private void ShowSettings()

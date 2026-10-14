@@ -474,6 +474,7 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 }
 
 .step.notice .step-icon { color: var(--warning); }
+.step.notice.stopped, .step.notice.stopped .step-icon { color: var(--text-3); }
 
 .step.error {
   display: flex;

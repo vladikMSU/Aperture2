@@ -212,6 +212,7 @@ namespace Aperture.Excel
         {
             if (disposed || transitioning || !busy) return;
             var operation = operationVersion;
+            Diagnostics.Write("abort_requested"); // Distinguishes a user Stop from other aborts in Pi history.
             startupCancellation?.Cancel();
             view.SetBusy(true, false);
             SetStatus("Останавливаю…");

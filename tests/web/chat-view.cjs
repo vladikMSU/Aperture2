@@ -234,6 +234,30 @@ function check(actual, expected, message) {
     check(await run().locator('.reasoning').count(), 0, 'Redacted provider reasoning must never be displayed.');
     check(await run().locator('.step.error').textContent(), 'Synthetic provider failure', 'Provider error must appear in the timeline.');
     check((await page.locator('#messages').textContent()).includes('opaque-fixture-never-display'), false, 'Opaque thinking signatures must never be rendered.');
+    // Whitespace-only text between steps, a user Stop and a router that switches models.
+    await receive({ type: 'message', who: 'Вы', text: 'Остановка и пустой текст.' });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'message_start', message: { ...modelMessage(), model: 'openrouter/free' } });
+    await update({ type: 'thinking_delta', contentIndex: 0, delta: 'Читаю листы.' });
+    await update({ type: 'text_delta', contentIndex: 1, delta: '\n\n' });
+    await update({ type: 'text_delta', contentIndex: 1, delta: '  ' });
+    const blankRead = { type: 'toolCall', id: 'blank-read', name: 'mcp__aperture_excel__excel_read_range', arguments: { sheet: 'Свод', address: 'A1:B2' } };
+    await update({ type: 'toolcall_start', contentIndex: 2, id: 'blank-read', toolName: blankRead.name });
+    await activity({ type: 'message_end', message: { ...modelMessage([{ type: 'thinking', thinking: 'Читаю листы.' }, { type: 'text', text: '\n\n  ' }, blankRead], 'toolUse'), model: 'openrouter/free', responseModel: 'vendor/first:free' } });
+    await activity({ type: 'tool_execution_end', toolCallId: 'blank-read', toolName: blankRead.name, result: { values: [[1]] }, isError: false, durationMs: 10 });
+    check(await run().locator('.text').count(), 0, 'Whitespace-only text must not create an empty block.');
+    check(await run().locator('.run-body > .trace').count(), 1, 'Whitespace-only text must not split the step group.');
+    await activity({ type: 'message_start', message: { ...modelMessage(), model: 'openrouter/free' } });
+    await update({ type: 'text_delta', contentIndex: 0, delta: 'Промежуточный ' });
+    await update({ type: 'text_delta', contentIndex: 0, delta: '' });
+    await activity({ type: 'message_end', message: { ...modelMessage([{ type: 'thinking', thinking: 'Долго думаю.' }], 'aborted'), model: 'openrouter/free', responseModel: 'vendor/second:free', errorMessage: 'Request was aborted' } });
+    check(await run().locator('.run-body > .trace').count(), 1, 'Removing partial text must merge the neighbouring step groups back.');
+    await activity({ type: 'agent_settled', aborted: true });
+    check(await run().locator('.step.error').count(), 0, 'A user Stop must not be shown as a provider error.');
+    check(await run().locator('.step.notice.stopped').textContent(), 'Ответ остановлен', 'A user Stop must be a neutral note in the timeline.');
+    check((await run().textContent()).includes('Request was aborted'), false, 'The raw abort message must not be shown.');
+    check(await run().locator('.run-facts').textContent(), 'openrouter/free → 2 модели · 240 ток.', 'Footer must summarize router models compactly.');
+    check(await run().locator('.run-facts').getAttribute('title'), 'openrouter/free\nvendor/first:free\nvendor/second:free', 'All concrete models stay available in the tooltip.');
     await receive({ type: 'message', who: 'Ошибка', text: 'Не удалось выполнить запрос' });
     check(await page.locator('.message.error').last().textContent(), 'Не удалось выполнить запрос', 'Host errors must render as error messages.');
 

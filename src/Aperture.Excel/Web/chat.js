@@ -37,7 +37,8 @@
     brush: 'M9.5 2.5l4 4-5 5-4-4zM4.5 7.5l-2 6 6-2',
     pulse: 'M2 8.5h3l1.5-4 3 7 1.5-3H14',
     tool: 'M10 2.8a3 3 0 0 0-3.7 3.9L2.8 10.2l3 3 3.5-3.5A3 3 0 0 0 13.2 6l-1.8 1.8-2.2-.3-.3-2.2z',
-    copy: 'M5.5 5.5h7v8h-7zM3.5 10.5v-8h7'
+    copy: 'M5.5 5.5h7v8h-7zM3.5 10.5v-8h7',
+    stop: 'M5 5h6v6H5z'
   };
   function icon(name, className = 'icon') {
     const svg = document.createElementNS(SVG, 'svg');
@@ -403,8 +404,14 @@
   }
   function removeNode(node) {
     const group = node.parentElement;
+    const before = node.previousElementSibling, after = node.nextElementSibling;
     node.remove();
-    if (group && group.classList.contains('trace') && !group.firstElementChild) group.remove();
+    if (group && group.classList.contains('trace') && !group.firstElementChild) { removeNode(group); return; }
+    // A removed text between two step groups would otherwise leave the trace split in two.
+    if (before && after && before.classList.contains('trace') && after.classList.contains('trace')) {
+      while (after.firstChild) before.appendChild(after.firstChild);
+      after.remove();
+    }
   }
   function setState(item, state) {
     item.state = state;
@@ -430,15 +437,16 @@
   // Model messages: each content part (reasoning, text, tool call) is a step at its own position.
   function startModel(message) {
     const run = ensureRun();
-    const model = { parts: new Map(), startedAt: Date.now() };
+    const model = { parts: new Map(), blankText: new Map(), startedAt: Date.now() };
     run.models.push(model); run.model = model;
     if (message) noteModel(run, message);
     setCurrent(run, 'Думаю');
     return model;
   }
   function currentModel() { const run = ensureRun(); return run.model || startModel(null); }
-  function noteModel(run, message) {
-    const name = message.responseModel || message.model;
+  function noteModel(run, message, final) {
+    if (message.model && !run.requestedModel) run.requestedModel = message.model;
+    const name = final ? message.responseModel || message.model : null;
     if (name && !run.modelNames.includes(name)) run.modelNames.push(name);
   }
   function partIndex(model, update, kind) {
@@ -491,10 +499,14 @@
   }
   function setText(model, index, text) {
     const existing = model.parts.get(index);
-    if (!text) {
+    if (!text || !text.trim()) {
+      // Whitespace-only text (some providers emit it between tool calls) is not shown,
+      // but is kept so that following deltas still build the full text.
+      if (text) model.blankText.set(index, text); else model.blankText.delete(index);
       if (existing && existing.kind === 'text') { markdownUpdates.delete(existing.node); removeNode(existing.node); model.parts.delete(index); }
       return;
     }
+    model.blankText.delete(index);
     const part = textPart(model, index);
     part.text = text;
     queueMarkdown(part.node, text);
@@ -647,7 +659,7 @@
     if (!message || message.role !== 'assistant') return;
     const run = ensureRun();
     const model = currentModel();
-    noteModel(run, message);
+    noteModel(run, message, true);
     const content = Array.isArray(message.content) ? message.content : [];
     const kinds = new Map(content.map((part, index) => [index, part && part.type]));
     // The authoritative message replaces streamed parts; stale partial reasoning/text disappears.
@@ -669,7 +681,12 @@
       run.outputTokens += message.usage.output;
       run.streamMs += Date.now() - model.startedAt;
     }
-    if (message.errorMessage || message.stopReason === 'error') {
+    if (message.stopReason === 'aborted') {
+      // Pi reports a stop as "Request was aborted"; it is the user's Stop, not a failure.
+      const node = element('div', 'step notice stopped');
+      node.append(icon('stop', 'step-icon'), element('span', 'step-label', 'Ответ остановлен'));
+      place(run, node, 'notice');
+    } else if (message.errorMessage || message.stopReason === 'error') {
       const node = element('div', 'step error');
       node.append(icon('alert', 'step-icon'), element('span', '', message.errorMessage || 'Провайдер вернул ошибку.'));
       place(run, node, 'error');
@@ -716,10 +733,16 @@
   }
   function renderFooter(run, finalNode) {
     const facts = [];
-    if (run.modelNames.length) facts.push(run.modelNames.join(', '));
+    const used = run.modelNames.filter(name => name !== run.requestedModel);
+    if (used.length === 1) facts.push((run.requestedModel ? run.requestedModel + ' → ' : '') + used[0]);
+    else if (used.length > 1) facts.push((run.requestedModel ? run.requestedModel + ' → ' : '') + plural(used.length, ['модель', 'модели', 'моделей']));
+    else if (run.requestedModel || run.modelNames.length) facts.push(run.requestedModel || run.modelNames[0]);
     if (run.outputTokens) facts.push(tokens(run.outputTokens) + ' ток.');
     if (run.outputTokens && run.streamMs > 500) facts.push(Math.round(run.outputTokens / (run.streamMs / 1000)) + ' ток/с');
-    run.footer.replaceChildren(element('span', 'run-facts', facts.join(' · ')));
+    const factsNode = element('span', 'run-facts', facts.join(' · '));
+    // The free router may switch models between steps; the full list stays in the tooltip.
+    factsNode.title = [run.requestedModel, ...used].filter(Boolean).join('\n');
+    run.footer.replaceChildren(factsNode);
     if (finalNode) {
       const text = run.models.flatMap(model => Array.from(model.parts.values())).filter(part => part.node === finalNode).map(part => part.text)[0] || finalNode.textContent;
       const copy = element('button', 'copy-button');
@@ -765,7 +788,7 @@
           const index = partIndex(model, update, 'text');
           const previous = model.parts.get(index);
           if (update.type === 'text_end') setText(model, index, update.content);
-          else if (update.type === 'text_delta') setText(model, index, (previous && previous.kind === 'text' ? previous.text : '') + (update.delta || ''));
+          else if (update.type === 'text_delta') setText(model, index, (previous && previous.kind === 'text' ? previous.text : model.blankText.get(index) || '') + (update.delta || ''));
           setCurrent(run, 'Пишу ответ');
         } else if (update.type.startsWith('toolcall_')) formedTool(model, update);
         break;

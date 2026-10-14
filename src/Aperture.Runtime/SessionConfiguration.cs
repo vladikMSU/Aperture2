@@ -69,6 +69,9 @@ namespace Aperture.Runtime
             string instructions = Path.Combine(dir, "aperture-system.md");
             File.WriteAllText(instructions,
                 "You are Aperture, an assistant inside Microsoft Excel. Answer in the user's language. " +
+                "Keep the user informed in visible text, not only in reasoning: before each group of tool calls write one or two short sentences " +
+                "in the user's language saying what you have established so far and what you will check next, and share notable intermediate findings as you go. " +
+                "Never leave a step with only tool calls. Keep these updates brief and finish with the complete answer. " +
                 "Use only the bound live workbook exposed by the aperture_excel MCP server. " +
                 "Call excel_target before relying on workbook facts. Always pass the exact excelInstanceId and workbookId required by the tools. " +
                 "excel_target returns metadata only: sheet names, used-range bounds, counts and application state; it does not read cell values, formulas or dependencies. " +

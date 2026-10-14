@@ -1,5 +1,5 @@
 # Python 3.12 Windows dependencies for the local Excel MCP and tests.
-# Upstream ThepExcelMCP is installed from the pinned Git submodule by setup.ps1.
+# Upstream ThepExcelMCP is installed from the pinned Git submodule by build/Aperture.Dependencies.targets.
 aiofile==3.12.3
 annotated-types==0.8.0
 anyio==4.15.1

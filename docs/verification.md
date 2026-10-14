@@ -64,3 +64,17 @@
 Два последующих минимальных запуска обычного Excel завершились штатно (`normalExit=true`, `forcedTermination=false`): с загруженной VSTO и с отключённой через `Connect=false` надстройкой. Оба выполнялись без обращения к диагностическому `COMAddIns.Object` и без MCP-нагрузки. Поэтому минимальный путь загрузки/выгрузки надстройки проверен, а причина удержания процесса в полном COM smoke отдельно не установлена. `Connect=false` также изменил сохранённый Office `LoadBehavior`; после диагностики developer-регистрация восстановлена. Локальный отчёт: `.local/smoke/lifecycle-isolation-c647f5ccc10045b3a117ac74f63b5988/report.json`.
 
 Проверен один небольшой read-only сценарий модели. Качество финансового аудита, работа на больших моделях, пользовательское удобство и все сочетания сторонних надстроек не проверены. Браузерные команды/контроллер, загрузка VSTO/WebView2 и вызовы модели проверялись соответствующими отдельными harness; полный ручной сценарий ввода в панели остаётся пользовательской приёмкой. Авторизация выполняется через Pi. Для пользовательских книг нет автоматического сохранения, удаления, закрытия или обещанного отката.
+
+## Сборка через Visual Studio без скриптов (14 октября 2026, вечер)
+
+Скрипты `setup.ps1`, `build.ps1`, `unregister-dev.ps1`, `test-vsto.ps1` и `pi.ps1` удалены; упоминания их результатов выше относятся к прежней схеме. Причина прежних проблем с Rebuild: закоммиченный csproj выключал подпись, поэтому prebuild-шаг Visual Studio (`EnableClickOnceManifestsSigning` в `Microsoft.VisualStudio.Tools.Applications.Project.dll`) создавал `Aperture.Excel_TemporaryKey.pfx`, импортировал свой сертификат и переписывал csproj, а `build.ps1` подписывал другим сертификатом. По IL этого метода временный ключ создаётся только при пустом `ManifestCertificateThumbprint`; теперь там постоянная метка, а `build/Aperture.Signing.targets` подставляет отпечаток `CN=Aperture2 Development` до `ResolveKeySource` и подписи.
+
+Проверено в чистом worktree:
+
+- `msbuild Aperture2.sln /restore`: получение submodules, `npm ci` + сборка Pi, создание `.venv` и `pip check`, подпись и регистрация — успешно за 4 мин 9 с; повторная сборка пропускает зависимости по меткам `.local/deps` и занимает около 3 с, без предупреждений.
+- `devenv.com Aperture2.sln /Rebuild` (IDE-путь с project flavor VSTO): 4 из 4 проектов, csproj не изменён, `*_TemporaryKey.pfx` и новые сертификаты не созданы; manifest подписан `CN=Aperture2 Development`. До метки этот же запуск воспроизводил генерацию временного ключа и правку csproj.
+- `msbuild /t:Clean` снимает регистрацию надстройки и её inclusion entry; следующая сборка восстанавливает обе записи.
+- `scripts/test.ps1`: 8 backend-тестов, 5 проверок runtime и 111 проверок панели (теперь проект `tests/vsto/PaneLifecycleHarness.csproj`) — успешно.
+- Live smoke без модели `.local/smoke/ecfb790faf134aff98fc7b8b77f13434/report.json`: автозагрузка VSTO (`connectedAutomatically=true`), WebView2, MCP read/write/calculate/readback, Pi RPC и очистка панели — успешно; тестовый Excel, как и раньше, завершён по точному handle после `Quit`.
+
+Попутно найдена ошибка запуска Pi: при кодовой странице консоли 65001 .NET Framework записывает в stdin дочернего процесса UTF-8 BOM раньше гейта `\n`, и `pi-launcher.mjs` завершался с «Aperture process gate failed». Runtime self-test падал так же и в основном checkout. Launcher теперь пропускает необязательный BOM; self-test проходит при консоли 65001 и 1251. В Excel без консоли это проявилось бы при системной кодовой странице UTF-8; на этой машине ACP = 1251.

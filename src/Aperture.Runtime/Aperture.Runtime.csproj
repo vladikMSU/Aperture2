@@ -7,4 +7,6 @@
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
+  <!-- Pi bundle and Python MCP environment that this runtime starts. -->
+  <Import Project="..\..\build\Aperture.Dependencies.targets" />
 </Project>

@@ -12,34 +12,26 @@
 
 ## Запуск
 
-Нужны Windows, настольный Excel, Microsoft Edge WebView2 Runtime, VS 2022 с Office/VSTO development tools и .NET Framework 4.8 targeting pack, Node.js ≥22.19, Python 3.12, Git. Здесь проверены Excel Microsoft 365 x64, VS 2022 Community, Node 24.18 и Python 3.12. Скрипт сборки использует MSBuild из Visual Studio; обычного `dotnet build` для Office-проекта недостаточно.
+Нужны Windows, настольный Excel, Microsoft Edge WebView2 Runtime, Visual Studio 2022 с нагрузкой «Разработка для Office/SharePoint» и .NET Framework 4.8 targeting pack, а также Node.js ≥22.19, Python 3.12 и Git в `PATH`. Здесь проверены Excel Microsoft 365 x64, VS 2022 Community 17.14, Node 24.18 и Python 3.12. VSTO-проект собирает только MSBuild из Visual Studio; `dotnet build` для него не подходит.
 
-Из корня репозитория в PowerShell:
+1. Открой `Aperture2.sln` и выполни **Build → Build Solution** (или сразу **F5**). Первая сборка сама:
+   - получает закреплённые submodules `external/pi` и `external/thepexcel`;
+   - собирает Pi (`npm ci`, `npm run build`) и создаёт `.venv` для Excel MCP — нужна сеть, занимает несколько минут;
+   - подписывает VSTO локальным сертификатом и регистрирует надстройку для текущего пользователя.
 
-```powershell
-# На новой машине: зависимости и закреплённый Pi
-.\scripts\setup.ps1
-# Runtime, VSTO, PiSmoke; регистрация надстройки для текущего пользователя
-.\scripts\build.ps1
-# Интерактивный Pi: затем в его интерфейсе введи /login openrouter
-.\scripts\pi.ps1
-```
+   Повторные сборки пропускают подготовку зависимостей, пока не изменятся закреплённые ревизии submodules или `requirements.lock.txt` (метки лежат в `.local\deps`). Логика — в [build/Aperture.Dependencies.targets](build/Aperture.Dependencies.targets) и [build/Aperture.Signing.targets](build/Aperture.Signing.targets).
+2. Один раз авторизуй Pi: из корня репозитория выполни `node external\pi\packages\coding-agent\dist\bundle\cli.js`, в его интерфейсе введи `/login openrouter` и выйди.
+3. **F5** запускает отдельный Excel (`excel /x`) с отладчиком; `Aperture.Excel` — стартовый проект по умолчанию. После сборки надстройка загружается и в обычном Excel. Вкладка **Aperture2 → Панель Aperture2** показывает чат. Открой тестовую книгу, проверь её имя в панели и отправь: «Прочитай структуру книги и формулы A1:D20 на Лист1. Пока ничего не меняй».
 
-На этой машине зависимости и Debug-надстройка уже подготовлены. После `/login openrouter` закрой интерактивный Pi и открой Excel обычным способом. Вкладка **Aperture2 → Панель Aperture2** показывает чат. Открой тестовую книгу, проверь её имя в панели и отправь: «Прочитай структуру книги и формулы A1:D20 на Лист1. Пока ничего не меняй».
+Уже работающий Excel не заменяет загруженную версию при пересборке. Для отдельного обычного экземпляра можно выполнить `excel /x` через Win+R и открыть книгу в нём.
 
-В Visual Studio выбери `Aperture.Excel` стартовым проектом. **Rebuild** собирает и регистрирует надстройку; для запуска отладки нажми **F5**. Уже работающий Excel не заменяет загруженную версию при пересборке. Для отдельного обычного экземпляра можно выполнить `excel /x` через Win+R и открыть книгу в нём.
-
-Если Rebuild выдаёт `MSB3061` для `WebView2Loader.dll`, посмотри указанный в предупреждении PID: даже после закрытия окна старый Excel может оставаться в фоне и удерживать DLL. Сначала сохрани нужные книги и закрой относящийся к ним Excel, затем повтори сборку. Не завершай все процессы Excel вслепую. Исчезновение вкладки само по себе ещё не доказывает ошибку сборки; live smoke ниже проверяет автозагрузку в новом экземпляре без принудительного подключения надстройки.
+Если сборка выдаёт `MSB3061` для `WebView2Loader.dll`, посмотри указанный в предупреждении PID: даже после закрытия окна старый Excel может оставаться в фоне и удерживать DLL. Сначала сохрани нужные книги и закрой относящийся к ним Excel, затем повтори сборку. Не завершай все процессы Excel вслепую. Исчезновение вкладки само по себе ещё не доказывает ошибку сборки; live smoke ниже проверяет автозагрузку в новом экземпляре без принудительного подключения надстройки.
 
 Кнопка привязки выбирает текущую книгу для чата; переключение активной книги не перенаправляет уже привязанный чат. После Save As или закрытия/повторного открытия книги явно обнови привязку. «Новый чат» создаёт новую сессию. «Стоп» прерывает запрос Pi; уже выполняющаяся COM-запись может завершиться, автоматического отката нет.
 
-Скрипт `scripts/build.ps1` для Debug создаёт локальный неэкспортируемый сертификат `Aperture2 Development` в CurrentUser/My, подписывает VSTO и регистрирует только эту надстройку и её manifest inclusion entry. Visual Studio может использовать свой локальный временный сертификат; ключи не входят в Git. Общие настройки доверия Office и Trusted Root не меняются. Снять регистрацию:
+**Подпись и регистрация.** VSTO загружает только подписанные manifests. Debug-сборка находит или один раз создаёт неэкспортируемый сертификат `CN=Aperture2 Development` в CurrentUser\My, подписывает им VSTO и регистрирует надстройку вместе с её manifest inclusion entry. Ключи не входят в Git, общие настройки доверия Office и Trusted Root не меняются. В csproj вместо отпечатка стоит метка `Aperture2-Development`: когда это свойство пустое, Visual Studio перед сборкой создаёт свой `*_TemporaryKey.pfx` и переписывает проект. **Build → Clean Solution** снимает регистрацию и запись доверия; `.venv`, собранный Pi и история чатов остаются.
 
-```powershell
-.\scripts\unregister-dev.ps1
-```
-
-Это developer-установка. Установщик для распространения пока не подготовлен. Release требует отдельного сертификата через `-CertificateThumbprint`.
+Это developer-установка; установщика для распространения пока нет. Release-сборка требует настоящего сертификата: `/p:ManifestCertificateThumbprint=<отпечаток>`.
 
 ## Модель и провайдер
 
@@ -115,12 +107,16 @@ Backend можно заменить на C# MCP или адаптер к при�
 
 ## Проверки
 
+Сначала собери решение (Debug) в Visual Studio, затем:
+
 ```powershell
-.\scripts\test.ps1        # backend, протокол и lifecycle runtime
+.\scripts\test.ps1        # backend, протокол/lifecycle runtime и тест панели
 .\scripts\test.ps1 -Live  # дополнительно настоящий Excel + VSTO + MCP + Pi RPC
 # Отдельно: реальный API и вызовы инструментов моделью, нужны учётные данные Pi
 .\.venv\Scripts\python.exe tools\LocalSmoke\run.py --model-smoke
 ```
+
+Тест панели — проект `PaneLifecycleHarness` в папке решения `tests`; его можно запустить и из Visual Studio (**Debug → Start Without Debugging** на этом проекте). Код возврата 0 означает успех.
 
 Live smoke открывает отдельный видимый Excel и собственные книги. Проверяет загрузку VSTO/панель, записывает 20 и 22, получает `=SUM(A1:A2)` → 42 через MCP и подтверждает несохранённое состояние. Проверяет привязку при активной второй книге, неизменность её контрольных ячеек и обзор книги с chart sheet. Pi проверяется без запроса к модели: RPC, подключение MCP и каталог инструментов. Только свои тестовые книги закрываются без сохранения. JSON-отчёты: `.local/smoke/`, вне Git.
 
@@ -137,11 +133,12 @@ Smoke не доказывает качество LLM, визуальное уд�
 | Путь | Содержимое |
 | --- | --- |
 | `src/Aperture.Excel` | VSTO, WebView2-чат в WinForms task pane, Ribbon, привязка книги |
+| `build` | MSBuild-цели: подготовка Pi/Python и подпись Debug-сборки |
 | `src/Aperture.Runtime` | .NET Framework 4.8 клиент Pi RPC и lifecycle |
 | `src/aperture_mcp` | MCP-адаптер, точная COM-привязка и каталог |
 | `external/pi` | Pi 1.2.0, git `9fe3f371622cad9cc1a3cbf044288abd0252192f` |
 | `external/thepexcel` | ThepExcelMCP 0.2.2, git `bd3aac3e188c3f1277f8694b12b00c128db773db` |
-| `tests`, `tools` | Тесты backend/runtime и live smoke |
+| `tests`, `tools` | Тесты backend/runtime/панели и live smoke |
 
 Настройки: `%LOCALAPPDATA%\Aperture2\settings.json`. Истории Pi и привязки: `%LOCALAPPDATA%\Aperture2\sessions`. Профиль WebView2: `%LOCALAPPDATA%\Aperture2\webview2`. Логи VSTO: `%LOCALAPPDATA%\Aperture2\logs` (без промптов и содержимого ячеек). Истории сессий могут содержать данные книг; они локальны и не включаются в Git. Авторизация остаётся в стандартном хранилище Pi.
 

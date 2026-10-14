@@ -1,9 +1,8 @@
 # Проверка жизненного цикла панели
 
-Запуск из корня: `powershell -ExecutionPolicy Bypass -File scripts\test-vsto.ps1`.
-Нужны Visual Studio MSBuild/Roslyn и targeting pack .NET Framework 4.8. Скрипт восстанавливает зависимость Newtonsoft.Json через сборку библиотеки runtime; результаты помещаются в `.local/tests/vsto`.
+`PaneLifecycleHarness.csproj` входит в `Aperture2.sln` (папка `tests`) и собирается вместе с решением. Запуск: в Visual Studio **Debug → Start Without Debugging** на этом проекте или `tests\vsto\bin\Debug\net48\PaneLifecycleHarness.exe`; `scripts\test.ps1` запускает его вместе с остальными проверками. Код возврата 0 означает успех.
 
-Harness компилирует настоящий `src/Aperture.Excel/ChatPaneControl.cs` вместе с явно тестовыми зависимостями из `FakeDependencies.cs`. Он запускает скрытые WinForms-контролы с созданными HWND и STA message loop; `ChatPaneView` заменяется fake с проверкой потока каждого вызова. Excel, WebView2, Pi, COM и модель не запускаются. Ключи и локальные настройки пользователя не читаются.
+Проект компилирует настоящий `src/Aperture.Excel/ChatPaneControl.cs` вместе с явно тестовыми зависимостями из `FakeDependencies.cs`. Он запускает скрытые WinForms-контролы с созданными HWND и STA message loop; `ChatPaneView` заменяется fake с проверкой потока каждого вызова. Excel, WebView2, Pi, COM и модель не запускаются. Ключи и локальные настройки пользователя не читаются.
 
 111 проверок включают прежние 16 проверок жизненного цикла: Stop во время отложенного старта, конкурирующий Send во время Rebind/«Новый чат» и закрытие панели во время старта. Тестовая фабрика намеренно возвращает процесс после отмены, проверяя, что панель освободит его и не отправит отложенный запрос.
 
@@ -15,6 +14,6 @@ Harness компилирует настоящий `src/Aperture.Excel/ChatPaneCo
 
 Ответ prompt с `disposition: handled` завершает занятость только после `get_state.isStreaming = false`: команды расширений вроде `/mcp` не создают `agent_settled`. Ответы `started`, `queued` и `handled` при активном Pi сохраняют занятость. Эти проверки не оценивают HTML/CSS или визуальное представление карточек — интерфейс проверяется отдельно.
 
-На прежнем контроллере тот же сценарий старта воспроизводил `InvalidOperationException` в `RichTextBox.get_TextLength` → `ChatPaneControl.AppendMessage` → `SendAsync`. Для локального повторения сохранённого варианта скрипт принимает `-PaneSource` и `-HarnessSource`; снимки исходного контроллера, harness и стек находятся в игнорируемой `.local/tests/vsto`. Обычный запуск всегда проверяет текущий контроллер.
+На прежнем контроллере тот же сценарий старта воспроизводил `InvalidOperationException` в `RichTextBox.get_TextLength` → `ChatPaneControl.AppendMessage` → `SendAsync`. Снимки исходного контроллера, harness и стек сохранены локально в игнорируемой `.local/tests/vsto`; проект всегда проверяет текущий `ChatPaneControl.cs`.
 
 Это регрессионные проверки панели, а не подтверждение живого управления Excel. Загрузка VSTO, удаление панелей закрытых окон и работа MCP проверяются отдельным live smoke.

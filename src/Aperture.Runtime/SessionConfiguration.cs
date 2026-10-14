@@ -25,11 +25,11 @@ namespace Aperture.Runtime
             string root = Path.GetFullPath(options.RepositoryRoot);
             string cli = Path.Combine(root, "external", "pi", "packages", "coding-agent", "dist", "bundle", "cli.js");
             string launcher = Path.Combine(root, "src", "Aperture.Runtime", "pi-launcher.mjs");
-            RequireFile(cli, "Pi is not built. Run scripts/setup.ps1 first.");
+            RequireFile(cli, "Pi is not built. Build Aperture2.sln in Visual Studio first.");
             RequireFile(launcher, "Aperture process launcher is missing.");
             string python = string.IsNullOrWhiteSpace(options.PythonPath)
                 ? Path.Combine(root, ".venv", "Scripts", "python.exe") : Path.GetFullPath(options.PythonPath);
-            if (options.EnableExcelTools) RequireFile(python, "Python environment is missing. Run scripts/setup.ps1 first.");
+            if (options.EnableExcelTools) RequireFile(python, "Python environment is missing. Build Aperture2.sln in Visual Studio first.");
             string node = ResolveExecutable(options.NodePath, "node.exe");
             string state = string.IsNullOrWhiteSpace(options.StateRoot)
                 ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Aperture2", "sessions")

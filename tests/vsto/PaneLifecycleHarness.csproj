@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Compiles the real ChatPaneControl.cs against the test doubles in FakeDependencies.cs.
+       No VSTO, WebView2, COM, Pi or provider is loaded. Run the built exe; exit code 0 = pass. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <!-- Same language level as the VSTO project that owns ChatPaneControl.cs. -->
+    <LangVersion>7.3</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\src\Aperture.Excel\ChatPaneControl.cs" Link="ChatPaneControl.cs" />
+    <Compile Include="FakeDependencies.cs" />
+    <Compile Include="PaneLifecycleHarness.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,87 @@
+<Project>
+  <!--
+    VSTO only loads signed manifests. Debug builds sign with a per-user,
+    non-exportable "CN=Aperture2 Development" certificate from CurrentUser\My,
+    created on the first build; no key file lives in the repository and Trusted
+    Root / Office trust settings are untouched. Release requires an explicit
+    /p:ManifestCertificateThumbprint=... of a real code-signing certificate.
+
+    Aperture.Excel.csproj sets ManifestCertificateThumbprint to the placeholder
+    "Aperture2-Development": Visual Studio's prebuild step generates a
+    *_TemporaryKey.pfx and rewrites the project whenever that property is empty.
+  -->
+  <PropertyGroup>
+    <ApertureDevCertificateSubject Condition="'$(ApertureDevCertificateSubject)' == ''">CN=Aperture2 Development</ApertureDevCertificateSubject>
+    <_ApertureNeedsCertificate Condition="'$(ManifestCertificateThumbprint)' == '' or '$(ManifestCertificateThumbprint)' == 'Aperture2-Development'">true</_ApertureNeedsCertificate>
+  </PropertyGroup>
+
+  <!-- CodeTaskFactory compiles against the full .NET Framework that Visual Studio's MSBuild
+       (the only MSBuild that builds VSTO) runs on, so CNG and CertificateRequest are available. -->
+  <UsingTask TaskName="ApertureEnsureDevCertificate" TaskFactory="CodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Subject ParameterType="System.String" Required="true" />
+      <Thumbprint ParameterType="System.String" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Reference Include="System" />
+      <Reference Include="System.Core" />
+      <Using Namespace="System.Security.Cryptography" />
+      <Using Namespace="System.Security.Cryptography.X509Certificates" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+const string CodeSigning = "1.3.6.1.5.5.7.3.3";
+using (var store = new X509Store(StoreName.My, StoreLocation.CurrentUser))
+{
+    store.Open(OpenFlags.ReadWrite);
+    X509Certificate2 best = null;
+    foreach (var candidate in store.Certificates)
+    {
+        if (candidate.Subject != Subject || !candidate.HasPrivateKey || candidate.NotAfter <= DateTime.Now.AddDays(1)) continue;
+        var codeSigning = false;
+        foreach (var extension in candidate.Extensions)
+        {
+            var usages = extension as X509EnhancedKeyUsageExtension;
+            if (usages == null) continue;
+            foreach (var usage in usages.EnhancedKeyUsages) if (usage.Value == CodeSigning) codeSigning = true;
+        }
+        if (codeSigning && (best == null || candidate.NotAfter > best.NotAfter)) best = candidate;
+    }
+    if (best == null)
+    {
+        Log.LogMessage(MessageImportance.High, "Aperture2: creating the local development signing certificate " + Subject + " in CurrentUser\\My.");
+        var parameters = new CngKeyCreationParameters
+        {
+            ExportPolicy = CngExportPolicies.None,
+            KeyUsage = CngKeyUsages.Signing,
+            Provider = CngProvider.MicrosoftSoftwareKeyStorageProvider
+        };
+        parameters.Parameters.Add(new CngProperty("Length", BitConverter.GetBytes(2048), CngPropertyOptions.None));
+        using (var key = CngKey.Create(CngAlgorithm.Rsa, "Aperture2-Development-" + Guid.NewGuid().ToString("N"), parameters))
+        using (var rsa = new RSACng(key))
+        {
+            var request = new CertificateRequest(Subject, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
+            request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(CodeSigning) }, false));
+            best = request.CreateSelfSigned(DateTimeOffset.Now.AddDays(-1), DateTimeOffset.Now.AddYears(2));
+            store.Add(best);
+        }
+    }
+    Thumbprint = best.Thumbprint;
+}
+]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="_ApertureRequireReleaseCertificate" BeforeTargets="VisualStudioForApplicationsBuild"
+          Condition="'$(Configuration)' == 'Release' and '$(_ApertureNeedsCertificate)' == 'true'">
+    <Error Text="Aperture2: a Release build must be signed with a real code-signing certificate. Pass /p:ManifestCertificateThumbprint=... (the local development certificate is for Debug only)." />
+  </Target>
+
+  <!-- Runs before the common ClickOnce key lookup, VSTO signing/registration and the Clean trust-entry removal. -->
+  <Target Name="_ApertureDevSigning" BeforeTargets="ResolveKeySource;VisualStudioForApplicationsBuild;RemoveOfficeAddInSecurity"
+          Condition="'$(Configuration)' != 'Release' and '$(_ApertureNeedsCertificate)' == 'true'">
+    <ApertureEnsureDevCertificate Subject="$(ApertureDevCertificateSubject)">
+      <Output TaskParameter="Thumbprint" PropertyName="ManifestCertificateThumbprint" />
+      <Output TaskParameter="Thumbprint" PropertyName="CertificateThumbprint" />
+    </ApertureEnsureDevCertificate>
+  </Target>
+</Project>

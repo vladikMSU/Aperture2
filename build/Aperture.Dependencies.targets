@@ -1,0 +1,105 @@
+<Project>
+  <!--
+    Prepares what the add-in starts at run time: the pinned submodules, the Pi
+    bundle and the Python environment of the Excel MCP. Imported by
+    Aperture.Runtime, so every solution build runs it once before compilation.
+    Each step is skipped while its inputs are unchanged; the stamps live in the
+    ignored .local\deps folder. Set ApertureSkipDependencies=true to bypass it.
+  -->
+  <PropertyGroup>
+    <ApertureRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..'))</ApertureRoot>
+    <ApertureDepsStampDir>$(ApertureRoot).local\deps\</ApertureDepsStampDir>
+    <AperturePiDir>$(ApertureRoot)external\pi\</AperturePiDir>
+    <AperturePiCli>$(AperturePiDir)packages\coding-agent\dist\bundle\cli.js</AperturePiCli>
+    <ApertureThepExcelDir>$(ApertureRoot)external\thepexcel\</ApertureThepExcelDir>
+    <ApertureVenvPython>$(ApertureRoot).venv\Scripts\python.exe</ApertureVenvPython>
+    <!-- Interpreter used only to create .venv; override with /p:AperturePython=... -->
+    <AperturePython Condition="'$(AperturePython)' == ''">python</AperturePython>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Let Visual Studio's up-to-date check notice dependency pin changes. -->
+    <UpToDateCheckInput Include="$(ApertureRoot)requirements.lock.txt" />
+    <UpToDateCheckInput Include="$(ApertureRoot).gitmodules" />
+  </ItemGroup>
+
+  <Target Name="PrepareApertureDependencies" BeforeTargets="BeforeBuild"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(ApertureSkipDependencies)' != 'true'"
+          DependsOnTargets="_ApertureSubmodules;_AperturePi;_AperturePython" />
+
+  <Target Name="_ApertureSubmodules">
+    <!-- Initialize missing submodules and move them back to the pinned commits. -->
+    <Exec Command="git submodule status" WorkingDirectory="$(ApertureRoot)" ConsoleToMSBuild="true"
+          StandardOutputImportance="low" Condition="Exists('$(ApertureRoot).git')">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ApertureSubmoduleStatus" />
+    </Exec>
+    <PropertyGroup>
+      <_ApertureSubmodulesStale Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(_ApertureSubmoduleStatus)', '(^|;)\s*[-+U]'))">true</_ApertureSubmodulesStale>
+    </PropertyGroup>
+    <Message Importance="high" Text="Aperture2: updating the pinned submodules (external\pi, external\thepexcel)…" Condition="'$(_ApertureSubmodulesStale)' == 'true'" />
+    <Exec Command="git submodule update --init --recursive" WorkingDirectory="$(ApertureRoot)" Condition="'$(_ApertureSubmodulesStale)' == 'true'" />
+    <Error Condition="!Exists('$(AperturePiDir)package.json') or !Exists('$(ApertureThepExcelDir)pyproject.toml')"
+           Text="Aperture2: the external\pi and external\thepexcel submodules are missing. Clone the repository with Git (git clone --recurse-submodules) and build again." />
+  </Target>
+
+  <Target Name="_AperturePi" DependsOnTargets="_ApertureSubmodules">
+    <Exec Command="git rev-parse HEAD" WorkingDirectory="$(AperturePiDir)" ConsoleToMSBuild="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_AperturePiRevision" />
+    </Exec>
+    <ReadLinesFromFile File="$(ApertureDepsStampDir)pi.stamp" Condition="Exists('$(ApertureDepsStampDir)pi.stamp')">
+      <Output TaskParameter="Lines" PropertyName="_AperturePiStamp" />
+    </ReadLinesFromFile>
+    <PropertyGroup>
+      <_AperturePiCurrent Condition="Exists('$(AperturePiCli)') and '$(_AperturePiStamp)' == '$(_AperturePiRevision)'">true</_AperturePiCurrent>
+    </PropertyGroup>
+
+    <Exec Command="node --version" ConsoleToMSBuild="true" StandardOutputImportance="low" IgnoreExitCode="true"
+          Condition="'$(_AperturePiCurrent)' != 'true'">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ApertureNodeVersion" />
+      <Output TaskParameter="ExitCode" PropertyName="_ApertureNodeExitCode" />
+    </Exec>
+    <PropertyGroup Condition="'$(_AperturePiCurrent)' != 'true' and '$(_ApertureNodeExitCode)' == '0'">
+      <_ApertureNodeTooOld>$([MSBuild]::VersionLessThan($(_ApertureNodeVersion.Trim().TrimStart('v')), '22.19.0'))</_ApertureNodeTooOld>
+    </PropertyGroup>
+    <Error Condition="'$(_AperturePiCurrent)' != 'true' and ('$(_ApertureNodeExitCode)' != '0' or '$(_ApertureNodeTooOld)' == 'true')"
+           Text="Aperture2: Node.js 22.19 or newer must be on PATH to build Pi (found: '$(_ApertureNodeVersion)'). Restart Visual Studio after installing it." />
+
+    <Message Importance="high" Text="Aperture2: building the pinned Pi $(_AperturePiRevision.Substring(0, 7)); the first build downloads npm packages and takes a few minutes…" Condition="'$(_AperturePiCurrent)' != 'true'" />
+    <Exec Command="npm ci --ignore-scripts --no-audit --no-fund" WorkingDirectory="$(AperturePiDir)" StandardOutputImportance="low" Condition="'$(_AperturePiCurrent)' != 'true'" />
+    <Exec Command="npm run build" WorkingDirectory="$(AperturePiDir)" StandardOutputImportance="low" Condition="'$(_AperturePiCurrent)' != 'true'" />
+    <Error Condition="!Exists('$(AperturePiCli)')" Text="Aperture2: the Pi build did not produce $(AperturePiCli)." />
+    <MakeDir Directories="$(ApertureDepsStampDir)" Condition="'$(_AperturePiCurrent)' != 'true'" />
+    <WriteLinesToFile File="$(ApertureDepsStampDir)pi.stamp" Lines="$(_AperturePiRevision)" Overwrite="true" Condition="'$(_AperturePiCurrent)' != 'true'" />
+  </Target>
+
+  <Target Name="_AperturePython" DependsOnTargets="_ApertureSubmodules">
+    <GetFileHash Files="$(ApertureRoot)requirements.lock.txt">
+      <Output TaskParameter="Hash" PropertyName="_ApertureRequirementsHash" />
+    </GetFileHash>
+    <Exec Command="git rev-parse HEAD" WorkingDirectory="$(ApertureThepExcelDir)" ConsoleToMSBuild="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ApertureThepExcelRevision" />
+    </Exec>
+    <ReadLinesFromFile File="$(ApertureDepsStampDir)python.stamp" Condition="Exists('$(ApertureDepsStampDir)python.stamp')">
+      <Output TaskParameter="Lines" PropertyName="_AperturePythonStamp" />
+    </ReadLinesFromFile>
+    <PropertyGroup>
+      <_AperturePythonInputs>$(_ApertureRequirementsHash)-$(_ApertureThepExcelRevision)</_AperturePythonInputs>
+      <_AperturePythonCurrent Condition="Exists('$(ApertureVenvPython)') and '$(_AperturePythonStamp)' == '$(_AperturePythonInputs)'">true</_AperturePythonCurrent>
+    </PropertyGroup>
+
+    <Message Importance="high" Text="Aperture2: preparing the Python environment of the Excel MCP (.venv)…" Condition="'$(_AperturePythonCurrent)' != 'true'" />
+    <Exec Command="&quot;$(AperturePython)&quot; -m venv .venv" WorkingDirectory="$(ApertureRoot)" IgnoreExitCode="true"
+          Condition="'$(_AperturePythonCurrent)' != 'true' and !Exists('$(ApertureVenvPython)')">
+      <Output TaskParameter="ExitCode" PropertyName="_ApertureVenvExitCode" />
+    </Exec>
+    <Error Condition="'$(_ApertureVenvExitCode)' != '' and '$(_ApertureVenvExitCode)' != '0'"
+           Text="Aperture2: could not create .venv with '$(AperturePython)'. Python 3.12 must be on PATH (or pass /p:AperturePython=full\path\python.exe)." />
+    <Exec Command="&quot;$(ApertureVenvPython)&quot; -m pip install --disable-pip-version-check -r requirements.lock.txt" WorkingDirectory="$(ApertureRoot)"
+          StandardOutputImportance="low" Condition="'$(_AperturePythonCurrent)' != 'true'" />
+    <Exec Command="&quot;$(ApertureVenvPython)&quot; -m pip install --disable-pip-version-check --no-deps -e external\thepexcel" WorkingDirectory="$(ApertureRoot)"
+          StandardOutputImportance="low" Condition="'$(_AperturePythonCurrent)' != 'true'" />
+    <Exec Command="&quot;$(ApertureVenvPython)&quot; -m pip check" WorkingDirectory="$(ApertureRoot)" Condition="'$(_AperturePythonCurrent)' != 'true'" />
+    <MakeDir Directories="$(ApertureDepsStampDir)" Condition="'$(_AperturePythonCurrent)' != 'true'" />
+    <WriteLinesToFile File="$(ApertureDepsStampDir)python.stamp" Lines="$(_AperturePythonInputs)" Overwrite="true" Condition="'$(_AperturePythonCurrent)' != 'true'" />
+  </Target>
+</Project>

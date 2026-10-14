@@ -222,7 +222,7 @@ def main() -> int:
                                                     for i in range(1, application.COMAddIns.Count + 1)]
             registered_id = next((value for value in report["checks"]["registeredAddins"]
                                   if value.casefold() == "aperture.excel"), None)
-            recovery = ("Rebuild the add-in with scripts/build.ps1, then start a new normal Excel process "
+            recovery = ("Rebuild Aperture2.sln in Visual Studio, then start a new normal Excel process "
                         "and rerun the smoke. This test does not repair registration or force-connect add-ins.")
             if registered_id is None:
                 raise RuntimeError("Aperture.Excel was missing from COMAddIns after normal Excel startup. " + recovery)

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Aperture.Runtime;
 using Newtonsoft.Json;
@@ -23,10 +24,19 @@ internal static class Program
         string root = Path.GetFullPath(Value(args, "--root") ?? Environment.CurrentDirectory);
         if (args.Contains("--self-test")) { await SelfTest(root); return 0; }
         bool protocolOnly = args.Contains("--protocol-only");
+        bool modelSmoke = args.Contains("--model-smoke");
         string context = Value(args, "--context");
         if (!protocolOnly && context == null) throw new ArgumentException("Use --context <target.json> or --protocol-only.");
+        if (modelSmoke)
+        {
+            Require(!protocolOnly && context != null, "--model-smoke requires a disposable --context and cannot use --protocol-only.");
+            string disposableRoot = Path.GetFullPath(Path.Combine(root, ".local", "smoke")) + Path.DirectorySeparatorChar;
+            Require(Path.GetFullPath(context).StartsWith(disposableRoot, StringComparison.OrdinalIgnoreCase),
+                "Model smoke accepts only contexts generated under this repository's .local/smoke. Never pass a user workbook context.");
+        }
         ExcelTarget target = context == null ? null : JsonConvert.DeserializeObject<ExcelTarget>(File.ReadAllText(context));
         var options = new PiSessionOptions { RepositoryRoot = root, EnableExcelTools = !protocolOnly };
+        if (modelSmoke) { options.Provider = "openrouter"; options.Model = "openrouter/free"; }
         using (var session = await PiSession.StartAsync(options, target))
         {
             JObject status = null;
@@ -47,18 +57,167 @@ internal static class Program
             var excel = status["excelTools"].Values<string>().ToArray();
             Require(active.All(t => t.StartsWith("mcp__aperture_excel__", StringComparison.Ordinal)), "Unexpected non-Excel tool was enabled.");
             if (!protocolOnly) Require(excel.Length > 0 && active.Length > 0, "No live Excel MCP tools loaded. " + string.Join("; ", notices));
+            JObject modelResult = modelSmoke ? await RunModelSmoke(session, target) : null;
             int pid = session.ProcessId;
             await session.StopAsync();
             Require(!ProcessExists(pid), "Pi process survived shutdown.");
             Console.WriteLine(new JObject
             {
-                ["ok"] = true, ["protocolOnly"] = protocolOnly, ["rpcGetState"] = true,
+                ["ok"] = modelResult == null || (bool)modelResult["ok"], ["protocolOnly"] = protocolOnly, ["rpcGetState"] = true,
                 ["sessionId"] = state["data"]?["sessionId"], ["modelSelected"] = state["data"]?["model"] != null,
                 ["activeTools"] = new JArray(active), ["excelTools"] = new JArray(excel), ["notices"] = new JArray(notices),
-                ["cleanShutdown"] = true, ["modelRequestMade"] = false
+                ["cleanShutdown"] = true, ["modelRequestMade"] = modelSmoke,
+                ["modelSmoke"] = modelResult
             }.ToString(Formatting.Indented));
+            if (modelResult != null && !(bool)modelResult["ok"]) return 1;
         }
         return 0;
+    }
+
+    private static async Task<JObject> RunModelSmoke(PiSession session, ExcelTarget target)
+    {
+        // This opt-in prompt runs only against the harness-created disposable book.
+        // No model/global config is modified, and there is no paid-model fallback.
+        const string prefix = "mcp__aperture_excel__";
+        var gate = new object();
+        var settled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var starts = new Dictionary<string, JObject>();
+        var completed = new List<string>();
+        var errors = new List<string>();
+        JObject observedTarget = null, observedRange = null;
+        string finalText = "";
+        bool aborted = false;
+        var watch = Stopwatch.StartNew();
+        EventHandler<PiEvent> collector = (sender, e) =>
+        {
+            lock (gate)
+            {
+                try
+                {
+                    if (e.Type == "tool_execution_start")
+                    {
+                        string name = (string)e.Json["toolName"] ?? "";
+                        starts[(string)e.Json["toolCallId"]] = (JObject)e.Json.DeepClone();
+                        if (name != prefix + "excel_target" && name != prefix + "excel_read_range")
+                            errors.Add("Model attempted an unexpected tool: " + name);
+                    }
+                    else if (e.Type == "tool_execution_end")
+                    {
+                        string name = (string)e.Json["toolName"] ?? "";
+                        if ((bool?)e.Json["isError"] == true) errors.Add("Model tool returned an error: " + name);
+                        else
+                        {
+                            completed.Add(name);
+                            JObject data = McpData(e.Json["result"]);
+                            if (name == prefix + "excel_target") observedTarget = data;
+                            if (name == prefix + "excel_read_range")
+                            {
+                                JObject start;
+                                Require(starts.TryGetValue((string)e.Json["toolCallId"], out start), "Read result has no matching invocation.");
+                                var toolArgs = start["args"];
+                                Require((string)toolArgs?["excelInstanceId"] == target.ExcelInstanceId
+                                    && (string)toolArgs?["workbookId"] == target.WorkbookId
+                                    && (string)toolArgs?["sheet"] == "ApertureSmoke"
+                                    && (string)toolArgs?["address"] == "A1:B2", "Model read did not use the exact disposable binding/range.");
+                                observedRange = data;
+                            }
+                        }
+                    }
+                    else if (e.Type == "message_end" && (string)e.Json["message"]?["role"] == "assistant")
+                    {
+                        var message = e.Json["message"];
+                        string error = (string)message["errorMessage"];
+                        if (!string.IsNullOrEmpty(error)) errors.Add("Provider/assistant error: " + error);
+                        if ((string)message["stopReason"] == "error" || (string)message["stopReason"] == "aborted")
+                            errors.Add("Assistant stopped with: " + (string)message["stopReason"]);
+                        var parts = message["content"] as JArray;
+                        if (parts != null)
+                        {
+                            string text = string.Concat(parts.Where(p => (string)p["type"] == "text").Select(p => (string)p["text"]));
+                            if (!string.IsNullOrWhiteSpace(text)) finalText = text;
+                        }
+                    }
+                    else if (e.Type == "agent_settled")
+                    {
+                        aborted = (bool?)e.Json["aborted"] == true;
+                        settled.TrySetResult(true);
+                    }
+                    else if (e.Type == "process_exit") settled.TrySetException(new IOException("Pi exited before the model run settled."));
+                }
+                catch (Exception error) { errors.Add("Event validation failed: " + error.Message); }
+            }
+        };
+        session.EventReceived += collector;
+        try
+        {
+            using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90)))
+            {
+                await session.SendPromptAsync(
+                    "This is a read-only integration check on a disposable workbook. " +
+                    "Call excel_target, then excel_read_range using exactly the returned excelInstanceId and workbookId, " +
+                    "sheet ApertureSmoke and address A1:B2. Use only those two tools. " +
+                    "Do not modify, create, format, calculate, save, close or delete anything. " +
+                    "Return one JSON object with computedB1 set to the numeric live value in B1 and formulaB1 set to the exact formula in B1. " +
+                    "Use the tools to obtain both facts; do not guess.", deadline.Token);
+                Task winner = await Task.WhenAny(settled.Task, Task.Delay(Timeout.Infinite, deadline.Token));
+                if (winner != settled.Task) throw new TimeoutException("Model smoke exceeded its 90-second deadline.");
+                await settled.Task;
+            }
+            lock (gate)
+            {
+                Require(!aborted, "Model run was aborted.");
+                Require(errors.Count == 0, string.Join("; ", errors));
+                Require(observedTarget != null && (string)observedTarget["workbookId"] == target.WorkbookId,
+                    "Model did not complete excel_target against the captured workbook.");
+                Require(observedRange != null && (double?)observedRange["values"]?[0]?[1] == 42
+                    && (string)observedRange["formulas"]?[0]?[1] == "=SUM(A1:A2)",
+                    "Model did not read live B1=42 and its expected formula through MCP.");
+                int firstBrace = finalText.IndexOf('{'), lastBrace = finalText.LastIndexOf('}');
+                Require(firstBrace >= 0 && lastBrace > firstBrace, "Assistant did not return a JSON result.");
+                JObject answer = JObject.Parse(finalText.Substring(firstBrace, lastBrace - firstBrace + 1));
+                Require((double?)answer["computedB1"] == 42 && (string)answer["formulaB1"] == "=SUM(A1:A2)",
+                    "Assistant answer did not report the live computed value and formula.");
+            }
+        }
+        catch (Exception error)
+        {
+            lock (gate) errors.Add(error is OperationCanceledException ? "Model smoke exceeded its 90-second deadline." : error.Message);
+            // Abort waits for Pi idle; bound it too, then the caller closes its job.
+            try
+            {
+                using (var abortDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
+                    await session.AbortAsync(abortDeadline.Token);
+            }
+            catch { }
+        }
+        finally { session.EventReceived -= collector; }
+        lock (gate)
+        {
+            return new JObject
+            {
+                ["ok"] = errors.Count == 0, ["provider"] = "openrouter", ["model"] = "openrouter/free",
+                ["modelRequestMade"] = true, ["agentSettled"] = settled.Task.Status == TaskStatus.RanToCompletion,
+                ["elapsedMs"] = watch.ElapsedMilliseconds, ["completedTools"] = new JArray(completed),
+                ["computedB1"] = observedRange?["values"]?[0]?[1], ["formulaB1"] = observedRange?["formulas"]?[0]?[1],
+                ["assistantText"] = finalText, ["errors"] = new JArray(errors.Distinct())
+            };
+        }
+    }
+
+    private static JObject McpData(JToken result)
+    {
+        // Pi wraps the raw MCP CallToolResult in its own structuredContent.
+        var raw = result?["structuredContent"];
+        if (raw?["structuredContent"] is JObject data) return data;
+        var blocks = raw?["content"] as JArray ?? result?["content"] as JArray;
+        if (blocks != null)
+            foreach (var block in blocks)
+                if ((string)block["type"] == "text")
+                {
+                    try { return JObject.Parse((string)block["text"]); }
+                    catch (JsonException) { }
+                }
+        return null;
     }
 
     private static async Task SelfTest(string root)

@@ -40,6 +40,7 @@
     <Reference Include="Microsoft.Office.Interop.Excel, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c"><Private>False</Private><EmbedInteropTypes>true</EmbedInteropTypes></Reference>
     <Reference Include="stdole, Version=7.0.3300.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a"><Private>False</Private></Reference>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
     <ProjectReference Include="..\Aperture.Runtime\Aperture.Runtime.csproj"><Name>Aperture.Runtime</Name></ProjectReference>
   </ItemGroup>
   <ItemGroup>
@@ -49,6 +50,10 @@
     <None Include="ThisAddIn.Designer.xml"><DependentUpon>ThisAddIn.cs</DependentUpon></None>
     <Compile Include="ApertureRibbon.cs" />
     <Compile Include="ChatPaneControl.cs"><SubType>UserControl</SubType></Compile>
+    <Compile Include="ChatPaneView.cs"><SubType>UserControl</SubType></Compile>
+    <Content Include="Web\chat.html"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <Content Include="Web\chat.css"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <Content Include="Web\chat.js"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
     <Compile Include="WorkbookBinding.cs" />
     <Compile Include="WindowLifetime.cs" />
     <Compile Include="PaneSettings.cs" />

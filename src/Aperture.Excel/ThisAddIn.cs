@@ -177,7 +177,8 @@ namespace Aperture.Excel
                     var validationError = p.Value.Control.BindingValidationError();
                     return new { windowHwnd = p.Key, paneId = p.Value.PaneId, boundWorkbookId = p.Value.Control.BoundWorkbookId,
                         sessionRunning = p.Value.Control.SessionRunning, bindingValid = validationError == null,
-                        bindingValidationError = validationError };
+                        bindingValidationError = validationError, viewReady = p.Value.Control.ViewReady,
+                        viewInitializationError = p.Value.Control.ViewInitializationError };
                 }).ToArray()
             });
         }

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([string]$PaneSource, [string]$HarnessSource)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -25,8 +25,13 @@ $arguments = @('/nologo', '/target:exe', '/langversion:7.3', '/nostdlib+', "/out
 foreach ($assembly in @('mscorlib', 'System', 'System.Core', 'System.Drawing', 'System.Windows.Forms')) {
     $arguments += '/reference:' + (Join-Path $framework ($assembly + '.dll'))
 }
-$arguments += @("/reference:$json", (Join-Path $workspace 'src\Aperture.Excel\ChatPaneControl.cs'),
-    (Join-Path $workspace 'tests\vsto\FakeDependencies.cs'), (Join-Path $workspace 'tests\vsto\PaneLifecycleHarness.cs'))
+$defaultSource = [string]::IsNullOrWhiteSpace($PaneSource)
+if ($defaultSource) { $PaneSource = Join-Path $workspace 'src\Aperture.Excel\ChatPaneControl.cs' }
+if ([string]::IsNullOrWhiteSpace($HarnessSource)) { $HarnessSource = Join-Path $workspace 'tests\vsto\PaneLifecycleHarness.cs' }
+$arguments += @("/reference:$json", $PaneSource,
+    (Join-Path $workspace 'tests\vsto\FakeDependencies.cs'), $HarnessSource)
+# The production ChatPaneView/WebView2 is replaced by the thread-checked fake
+# view; compile the real controller only, with no browser installation required.
 & $compiler @arguments
 if ($LASTEXITCODE -ne 0) { throw 'Pane lifecycle harness compilation failed.' }
 Copy-Item -LiteralPath $json -Destination (Join-Path $artifactDirectory 'Newtonsoft.Json.dll') -Force

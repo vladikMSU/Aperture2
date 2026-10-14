@@ -1,7 +1,8 @@
 """Technical integration smoke; owns only a new disposable Excel process/book.
 
 This verifies add-in loading and the real Pi/MCP plumbing, not human UI acceptance.
-No provider credentials are needed and no workbook is saved.
+No provider credentials are needed unless --model-smoke is explicitly enabled.
+No workbook is saved.
 """
 from __future__ import annotations
 
@@ -46,7 +47,7 @@ def visible_windows_for_process(pid: int) -> list[int]:
     return windows
 
 
-def pane_snapshot(automation, expected_hwnds: set[int]) -> dict:
+def pane_snapshot(automation, expected_hwnds: set[int], require_view: bool = True) -> dict:
     status = json.loads(str(automation.StatusJson()))
     panes = {pane["windowHwnd"]: pane for pane in status["panes"]}
     assert status.get("loaded") is True, status
@@ -56,6 +57,9 @@ def pane_snapshot(automation, expected_hwnds: set[int]) -> dict:
         assert pane.get("paneId") and pane.get("boundWorkbookId"), pane
         assert pane.get("bindingValid") is True, pane
         assert pane.get("bindingValidationError") is None, pane
+        assert pane.get("viewInitializationError") is None, pane
+        if require_view:
+            assert pane.get("viewReady") is True, pane
     return status
 
 
@@ -158,7 +162,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-pi", action="store_true", help="Run only VSTO and real Excel MCP checks")
     parser.add_argument("--skip-vsto", action="store_true", help="Debug backend checks without add-in registration")
+    parser.add_argument("--model-smoke", action="store_true", help="Opt in to a real OpenRouter/free read-only model request against our disposable workbook")
     args = parser.parse_args()
+    if args.model_smoke and args.skip_pi:
+        parser.error("--model-smoke cannot be combined with --skip-pi")
     output_dir = ROOT / ".local" / "smoke" / uuid.uuid4().hex
     output_dir.mkdir(parents=True)
     report: dict = {"runId": output_dir.name, "checks": {}}
@@ -248,6 +255,12 @@ def main() -> int:
             # full 1.5-second cleanup ticks. Recreating panes silently loses chat.
             pump_for(1.8)
             expected_hwnds = {target["workbookHwnd"], control_hwnd}
+            view_deadline = time.monotonic() + 30
+            while time.monotonic() < view_deadline:
+                initial = pane_snapshot(automation, expected_hwnds, require_view=False)
+                if all(pane.get("viewReady") for pane in initial["panes"]):
+                    break
+                pump_for(0.2)
             snapshots = [pane_snapshot(automation, expected_hwnds)]
             stable_panes = pane_identities(snapshots[0])
             for _ in range(3):
@@ -288,9 +301,23 @@ def main() -> int:
             executable = ROOT / "tools" / "PiSmoke" / "bin" / "Debug" / "net48" / "PiSmoke.exe"
             if not executable.is_file():
                 raise FileNotFoundError(f"Build PiSmoke first: {executable}")
-            report["checks"]["piRpc"] = run_child([
+            model_before = (workbook.Worksheets("ApertureSmoke").Range("A1:B2").Value2,
+                            workbook.Worksheets("ApertureSmoke").Range("A1:B2").Formula2,
+                            [workbook.Sheets(i).Name for i in range(1, workbook.Sheets.Count + 1)])
+            pi_arguments = [
                 str(executable), "--root", str(ROOT), "--context", str(target_path),
-            ])
+            ]
+            if args.model_smoke:
+                pi_arguments.append("--model-smoke")
+            report["checks"]["piRpc"] = run_child(pi_arguments, timeout=140 if args.model_smoke else 100)
+            if args.model_smoke:
+                model_after = (workbook.Worksheets("ApertureSmoke").Range("A1:B2").Value2,
+                               workbook.Worksheets("ApertureSmoke").Range("A1:B2").Formula2,
+                               [workbook.Sheets(i).Name for i in range(1, workbook.Sheets.Count + 1)])
+                assert model_before == model_after, "Read-only model check changed its target workbook"
+                assert control_workbook.Worksheets(1).Range("A1:B4").Value2 == control_values
+                assert control_workbook.Worksheets(1).Range("A1:B4").Formula2 == control_formulas
+                report["checks"]["modelReadOnlyVerified"] = True
             print("Pi RPC and MCP initialization passed.", flush=True)
         if not args.skip_vsto:
             control_workbook.Close(SaveChanges=False)

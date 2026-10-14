@@ -155,7 +155,8 @@ internal static class PaneLifecycleHarness
                 running.EmitDiagnostic("worker diagnostic");
             });
             await FlushUi(pane);
-            Check(View(pane).Transcript.Exists(text => text.Contains("worker response")), "Background RPC text was not rendered.");
+            Check(View(pane).Activity.Exists(item => (string)item["assistantMessageEvent"]?["delta"] == "worker response"),
+                "Background RPC text was not forwarded to the timeline.");
             Check(View(pane).StatusText == "worker diagnostic", "Background RPC diagnostic was not rendered.");
             await Task.Run(() => running.EmitEvent(JObject.Parse("{type:'agent_settled'}")));
             await FlushUi(pane);
@@ -248,13 +249,12 @@ internal static class PaneLifecycleHarness
             await send;
             Check(Field<bool>(pane, "busy"), "An uncertain prompt timeout released the turn.");
             Check(View(pane).Busy && View(pane).CanStop, "Uncertain prompt timeout did not keep Stop enabled.");
-            var previousEnds = View(pane).AssistantEndCount;
             var abort = CallWithoutContext(pane, "AbortAsync");
             Check(!View(pane).CanStop, "Duplicate Stop was not disabled while abort was pending.");
             await Task.Run(() => running.AbortGate.SetResult(true));
             await abort;
             Check(!Field<bool>(pane, "busy"), "Confirmed abort did not release the turn without a context.");
-            Check(View(pane).AssistantEndCount > previousEnds, "Confirmed abort kept the prior assistant stream open.");
+            Check(HasTerminal(View(pane), "stopped"), "Confirmed abort did not end the active timeline as stopped.");
             Check(View(pane).StatusText.Contains("остановлен"), "Confirmed abort status was not rendered on the UI thread.");
         }
 
@@ -327,8 +327,10 @@ internal static class PaneLifecycleHarness
                 "{type:'message_update',assistantMessageEvent:{type:'text_delta',contentIndex:1,delta:'final'}}",
                 "{type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'thinking',thinking:'fallback reasoning two'},{type:'text',text:'final answer'}]}}",
                 "{type:'agent_end',messages:[],willRetry:false}");
-            Check(view.Activity.FindAll(item => (string)item["type"] == "message_update").Count == 3,
-                "Activity must include every thinking event but exclude assistant text deltas.");
+            Check(view.Activity.FindAll(item => (string)item["type"] == "message_update").Count == 5,
+                "Every reasoning and text delta must reach the timeline in arrival order.");
+            Check((string)view.Activity.FindAll(item => (string)item["type"] == "message_update")[3]["assistantMessageEvent"]?["delta"] == "answer",
+                "Text deltas must keep their position between reasoning and tool events.");
             Check(view.Activity.Exists(item => (string)item["type"] == "message_end" &&
                 (string)item["message"]?["content"]?[0]?["thinking"] == "fallback reasoning two"),
                 "Authoritative message_end reasoning fallback was lost.");
@@ -344,7 +346,9 @@ internal static class PaneLifecycleHarness
             Check((string)ends[0]["result"]?["content"]?[0]?["text"] == "range result" && (int?)ends[0]["durationMs"] == 7,
                 "Tool result payload was not forwarded intact.");
             Check(!view.Transcript.Exists(text => text.StartsWith("Инструмент:")), "Tool activity duplicated legacy transcript lines.");
-            Check(view.LastAssistantReplacement == "final answer", "Authoritative final text did not reconcile an incomplete delta stream.");
+            Check(view.Activity.Exists(item => (string)item["type"] == "message_end" &&
+                (string)item.SelectToken("message.content[1].text") == "final answer"),
+                "Authoritative final text must reach the timeline to reconcile an incomplete delta stream.");
             Check(Field<bool>(pane, "busy"), "agent_end incorrectly settled the run before Pi's terminal event.");
             await EmitAsync(pane, running, "{type:'agent_settled',aborted:false}");
             Check(!Field<bool>(pane, "busy") && view.StatusText == "Готово" && !view.StatusIsError,

@@ -313,26 +313,15 @@ namespace Aperture.Excel
             {
                 if (!ReferenceEquals(sender, session)) return;
                 var json = args.Json;
-                if (IsActivityEvent(args.Type, json)) view.ApplyActivity(json);
-                if (args.Type == "message_update")
-                {
-                    var update = json["assistantMessageEvent"];
-                    if ((string)update?["type"] == "text_delta")
-                    { view.AppendAssistant((string)update["delta"]); }
-                }
-                else if (args.Type == "message_end")
+                // The view builds one chronological timeline from the raw events: text,
+                // reasoning and tool calls keep their content positions. message_end is
+                // authoritative for the parts the delta-only stream left incomplete.
+                if (IsActivityEvent(args.Type)) view.ApplyActivity(json);
+                if (args.Type == "message_end")
                 {
                     var message = json["message"];
                     if ((string)message?["role"] == "assistant")
                     {
-                        var finalText = String.Empty;
-                        if (message["content"] is JArray parts)
-                            foreach (var part in parts)
-                                if ((string)part["type"] == "text") finalText += (string)part["text"];
-                        // The RPC stream is delta-only; the final message is authoritative
-                        // even when a provider's earlier deltas were incomplete.
-                        view.SetAssistantText(finalText);
-                        view.EndAssistant();
                         var error = (string)message["errorMessage"];
                         var stopReason = (string)message["stopReason"];
                         if (stopReason == "aborted")
@@ -342,8 +331,8 @@ namespace Aperture.Excel
                         }
                         else if (stopReason == "error" || !String.IsNullOrWhiteSpace(error))
                         {
+                            // The timeline shows the provider error at its position in the run.
                             runError = String.IsNullOrWhiteSpace(error) ? "Провайдер вернул ошибку" : error;
-                            view.AppendMessage("Ошибка", runError);
                             SetStatus("Ошибка ответа · ожидаю завершения или повтора", true);
                         }
                         else
@@ -356,10 +345,7 @@ namespace Aperture.Excel
                     }
                 }
                 else if (args.Type == "tool_execution_start")
-                {
-                    view.EndAssistant();
-                    SetStatus("Работаю с книгой…");
-                }
+                { SetStatus("Работаю с книгой…"); }
                 else if (args.Type == "tool_execution_end")
                 {
                     SetStatus("Обрабатываю результат…");
@@ -373,7 +359,7 @@ namespace Aperture.Excel
                 }
                 else if (args.Type == "agent_settled")
                 {
-                    view.EndAssistant(); SetBusy(false);
+                    SetBusy(false);
                     if ((bool?)json["aborted"] == true || runStopped)
                     { EndActivity("stopped"); SetStatus("Ответ остановлен"); }
                     else if (!String.IsNullOrWhiteSpace(runError))
@@ -385,19 +371,15 @@ namespace Aperture.Excel
             });
         }
 
-        private static bool IsActivityEvent(string type, JObject json)
+        private static bool IsActivityEvent(string type)
         {
             switch (type)
             {
                 case "agent_start": case "agent_end": case "turn_start": case "turn_end":
-                case "message_start": case "message_end":
+                case "message_start": case "message_update": case "message_end":
                 case "tool_execution_start": case "tool_execution_update": case "tool_execution_end":
                 case "auto_retry_start": case "auto_retry_end":
                 case "agent_settled": case "process_exit": case "error": return true;
-                case "message_update":
-                    var update = (string)json["assistantMessageEvent"]?["type"];
-                    return update == "thinking_start" || update == "thinking_delta" || update == "thinking_end" ||
-                        update == "toolcall_start" || update == "toolcall_delta" || update == "toolcall_end";
                 default: return false;
             }
         }
@@ -407,7 +389,6 @@ namespace Aperture.Excel
             // Preflight/startup errors and idle chat transitions do not own the
             // previous completed activity card. Only a submitted user turn does.
             if (!activityOwned) return;
-            view.EndAssistant();
             if (status == "stopped") runStopped = true;
             view.ApplyActivity(new JObject { ["type"] = "aperture_run_end", ["status"] = status });
             activityOwned = false;

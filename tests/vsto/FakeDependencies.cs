@@ -95,8 +95,6 @@ namespace Aperture.Excel
     {
         private readonly int ownerThread = Thread.CurrentThread.ManagedThreadId;
         internal string BindingText, StatusText;
-        internal string LastAssistantReplacement;
-        internal int AssistantEndCount;
         internal bool Busy, CanStop, PromptCleared, StatusIsError;
         internal readonly List<string> Transcript = new List<string>();
         internal readonly List<JObject> Activity = new List<JObject>();
@@ -115,9 +113,6 @@ namespace Aperture.Excel
         internal void SetStatus(string text, bool error) { VerifyThread(); StatusText = text; StatusIsError = error; }
         internal void SetBusy(bool busy, bool canStop = true) { VerifyThread(); Busy = busy; CanStop = canStop; }
         internal void AppendMessage(string who, string text) { VerifyThread(); Transcript.Add(who + ": " + text); }
-        internal void AppendAssistant(string text) { VerifyThread(); Transcript.Add(text); }
-        internal void SetAssistantText(string text) { VerifyThread(); LastAssistantReplacement = text; }
-        internal void EndAssistant() { VerifyThread(); AssistantEndCount++; }
         internal void ApplyActivity(JObject rawPiEvent) { VerifyThread(); Activity.Add((JObject)rawPiEvent.DeepClone()); }
         internal void ClearTranscript() { VerifyThread(); Transcript.Clear(); Activity.Clear(); }
         internal void ClearPrompt() { VerifyThread(); PromptCleared = true; }

@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using Microsoft.Win32;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -26,6 +27,7 @@ namespace Aperture.Excel
         private const string AppUrl = "https://aperture.invalid/chat.html";
         private readonly WebView2 browser;
         private readonly Label loading;
+        private readonly CoreWebView2PreferredColorScheme colorScheme = OfficeColorScheme();
         private readonly Queue<JObject> pending = new Queue<JObject>();
         private readonly object pendingLock = new object();
         private bool initializing;
@@ -41,7 +43,9 @@ namespace Aperture.Excel
         internal ChatPaneView()
         {
             Dock = DockStyle.Fill;
-            BackColor = Color.FromArgb(29, 31, 35);
+            var dark = colorScheme == CoreWebView2PreferredColorScheme.Dark ||
+                (colorScheme == CoreWebView2PreferredColorScheme.Auto && WindowsAppsUseDarkTheme());
+            BackColor = dark ? Color.FromArgb(28, 29, 32) : Color.FromArgb(247, 247, 248);
             browser = new WebView2
             {
                 Dock = DockStyle.Fill,
@@ -55,7 +59,7 @@ namespace Aperture.Excel
             {
                 Dock = DockStyle.Fill,
                 Text = "Открываю Aperture…",
-                ForeColor = Color.FromArgb(170, 176, 186),
+                ForeColor = dark ? Color.FromArgb(179, 181, 188) : Color.FromArgb(76, 79, 87),
                 BackColor = BackColor,
                 Font = new Font("Segoe UI", 10F),
                 TextAlign = ContentAlignment.MiddleCenter,
@@ -99,6 +103,7 @@ namespace Aperture.Excel
                 var assets = Path.Combine(Path.GetDirectoryName(new Uri(Assembly.GetExecutingAssembly().CodeBase).LocalPath), "Web");
                 if (!File.Exists(Path.Combine(assets, "chat.html"))) throw new FileNotFoundException("Не найдены файлы интерфейса Aperture (Web/chat.html). Пересоберите надстройку.");
                 var core = browser.CoreWebView2;
+                core.Profile.PreferredColorScheme = colorScheme;
                 core.Settings.AreHostObjectsAllowed = false;
                 core.Settings.AreDevToolsEnabled = false;
                 // Reload would discard DOM state while the owning Pi session keeps
@@ -123,6 +128,33 @@ namespace Aperture.Excel
                 core.Navigate(AppUrl);
             }
             catch (Exception ex) { ShowFailure(ex); }
+        }
+
+        // Follow an explicit Office theme (File > Account > Office Theme); "Use system setting"
+        // or an unknown value follows Windows through prefers-color-scheme.
+        private static CoreWebView2PreferredColorScheme OfficeColorScheme()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Office\16.0\Common"))
+                {
+                    var theme = key?.GetValue("UI Theme") as int?;
+                    if (theme == 3 || theme == 4) return CoreWebView2PreferredColorScheme.Dark;
+                    if (theme == 0 || theme == 5) return CoreWebView2PreferredColorScheme.Light;
+                }
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException || ex is UnauthorizedAccessException || ex is IOException) { }
+            return CoreWebView2PreferredColorScheme.Auto;
+        }
+
+        private static bool WindowsAppsUseDarkTheme()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                    return key?.GetValue("AppsUseLightTheme") as int? == 0;
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException || ex is UnauthorizedAccessException || ex is IOException) { return false; }
         }
 
         private static bool IsAppDocument(string source)
@@ -159,9 +191,6 @@ namespace Aperture.Excel
         internal void SetStatus(string text, bool error) { Enqueue(new JObject { ["type"] = "status", ["text"] = text, ["error"] = error }); }
         internal void SetBusy(bool busy, bool canStop = true) { Enqueue(new JObject { ["type"] = "busy", ["busy"] = busy, ["canStop"] = canStop }); }
         internal void AppendMessage(string who, string text) { Enqueue(new JObject { ["type"] = "message", ["who"] = who, ["text"] = text }); }
-        internal void AppendAssistant(string text) { Enqueue(new JObject { ["type"] = "assistant_delta", ["text"] = text }); }
-        internal void SetAssistantText(string text) { Enqueue(new JObject { ["type"] = "assistant_replace", ["text"] = text }); }
-        internal void EndAssistant() { Enqueue(new JObject { ["type"] = "assistant_end" }); }
         internal void ApplyActivity(JObject rawPiEvent)
         {
             if (rawPiEvent != null)

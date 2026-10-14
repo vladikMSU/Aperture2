@@ -1,0 +1,30 @@
+# Local dependencies and builds
+.venv/
+**/bin/
+**/obj/
+.vs/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Local runtime state, logs and disposable books
+.local/
+work/
+*.user
+*.suo
+*.log
+*.xlsx
+*.xlsm
+*.xlsb
+*.xls
+
+# Credentials and signing material
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+auth.json
+runtime-settings.local.json

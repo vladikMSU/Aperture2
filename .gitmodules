@@ -1,0 +1,6 @@
+[submodule "external/pi"]
+	path = external/pi
+	url = https://github.com/earendil-works/pi.git
+[submodule "external/thepexcel"]
+	path = external/thepexcel
+	url = https://github.com/ThepExcel/ThepExcelMCP.git

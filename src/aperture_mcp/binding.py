@@ -6,6 +6,7 @@ module deliberately replaces its auto-launch and active-workbook routing.
 from __future__ import annotations
 
 import ctypes
+import gc
 import json
 import queue
 import threading
@@ -43,6 +44,19 @@ class Target:
                    for key in ("excelProcessId", "excelHwnd", "workbookHwnd")):
             raise ValueError("Target PID and window handles must be positive integers")
         return target
+
+
+def _without_frames(exc: BaseException) -> BaseException:
+    """Drop traceback frames of an exception chain: their locals can hold Excel COM objects."""
+    pending, seen = [exc], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        current.__traceback__ = None
+        pending += [current.__cause__, current.__context__]
+    return exc
 
 
 def window_pid(hwnd: int) -> int:
@@ -143,17 +157,37 @@ class BoundSession(ExcelSession):
         try:
             while True:
                 future, fn, mutation = self._queue.get()
+                result = error = None
                 try:
                     self.get_workbook()
                     # Curated mutations are already bounded bulk operations.
                     # Never change global Application flags here: this process
                     # can be killed by the parent job before a finally runs.
                     result = fn()
-                    future.set_result(result)
                 except Exception as exc:
-                    future.set_exception(exc)
+                    error = _without_frames(exc)
+                finally:
+                    # Release before reporting, so no reference outlives a returned result.
+                    del fn
+                    self._release_excel()
+                if error is None:
+                    future.set_result(result)
+                else:
+                    future.set_exception(error)
+                result = error = None
         finally:
             pythoncom.CoUninitialize()
+
+    def _release_excel(self):
+        """Hold no Excel COM references between operations.
+
+        The parent job kills this process when the chat or Excel closes. References
+        of a killed client stay registered in Excel, which then keeps running hidden
+        after the user closes it. Identity is re-checked on the next operation.
+        """
+        self._workbook = None
+        self._app = None
+        gc.collect()
 
     def call(self, fn, *, mutation=False):
         with self._gate:
@@ -210,20 +244,17 @@ class BoundSession(ExcelSession):
             raise ToolError("Only the workbookId captured for this chat is accepted.")
         app = self.get_app()
         if self._workbook is None:
-            matches = [app.Workbooks(i) for i in range(1, app.Workbooks.Count + 1)
-                       if workbook_matches(app.Workbooks(i), self.target)]
+            # Resolved per operation by name, full path and the captured window handle:
+            # a closed/reopened book gets a new window and a Save As changes the path,
+            # so neither is ever accepted as a replacement.
+            try:
+                matches = [app.Workbooks(i) for i in range(1, app.Workbooks.Count + 1)
+                           if workbook_matches(app.Workbooks(i), self.target)]
+            except Exception as exc:
+                raise ToolError("Workbook binding expired. Start a new chat; no replacement was selected.") from exc
             if len(matches) != 1:
                 raise ToolError("Captured workbook is not uniquely open in this Excel instance. Start a new chat binding.")
             self._workbook = matches[0]
-        # Never re-resolve by name after closing/reopening or a Save As.
-        try:
-            valid = workbook_matches(self._workbook, self.target)
-            present = any(app.Workbooks(i)._oleobj_ == self._workbook._oleobj_
-                          for i in range(1, app.Workbooks.Count + 1))
-        except Exception as exc:
-            raise ToolError("Workbook binding expired. Start a new chat; no replacement was selected.") from exc
-        if not valid or not present:
-            raise ToolError("Workbook identity changed or closed. Start a new chat binding.")
         return self._workbook
 
     def get_sheet(self, name, workbook=None):

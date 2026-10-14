@@ -114,6 +114,38 @@ def test_timeout_does_not_retry_and_requires_reconciliation():
     assert vars(app) == dict(ScreenUpdating=True, EnableEvents=True, Calculation=-4105)
 
 
+def test_operations_hold_no_excel_references_between_calls():
+    # The parent job kills this process when the chat or Excel closes. A killed client
+    # that still holds COM references keeps the closed Excel running hidden.
+    import weakref
+
+    class ComObject:
+        pass
+
+    session = BoundSession(make_target())
+    held = []
+
+    def resolve(workbook=None):
+        session._app = session._app or ComObject()
+        session._workbook = session._workbook or ComObject()
+        held.extend([weakref.ref(session._app), weakref.ref(session._workbook)])
+        return session._workbook
+
+    session.get_workbook = resolve
+    assert session.call(lambda: session.get_workbook() is not None) is True
+    assert session._app is None and session._workbook is None
+    assert held and all(ref() is None for ref in held)
+
+    def failing():
+        sheet = ComObject()  # referenced only by this frame, i.e. by the traceback
+        held.append(weakref.ref(sheet))
+        raise RuntimeError("COM call failed")
+
+    with pytest.raises(RuntimeError, match="COM call failed"):
+        session.call(failing)
+    assert all(ref() is None for ref in held)
+
+
 def test_catalog_and_wrong_target_cannot_reach_backend():
     from fastmcp import Client
     class UnusedSession:

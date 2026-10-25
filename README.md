@@ -8,6 +8,8 @@
 
 На этой машине проверены сборка, загрузка VSTO и WebView2-панели внутри Excel, реальные чтение/запись/пересчёт/чтение результата в несохранённой книге и запрос через `openrouter/free`: модель вызвала инструменты, прочитала формулу `=SUM(A1:A2)` и вернула 42. Исправлена ошибка доступа к UI из фонового потока после запуска Pi. Пользовательская приёмка панели и качества аудита остаётся за пользователем.
 
+26 октября 2026 добавлен [безголовый хост BenchHost](#безголовый-запуск-для-бенчмарка) для внешнего бенчмарка и пользовательский провайдер RouterAI. Приёмка прошла на DeepSeek V4.1 Flash: правка в живой книге, записи прогона с usage и стоимостью провайдера, таймаут без оставшихся процессов.
+
 Приватный прототип пользователя с 40+ инструментами не является зависимостью. Позже его можно подключить через MCP-адаптер; совместимость без исходников не проверена. Оболочка и доступные здесь инструменты собираются самостоятельно.
 
 ## Запуск
@@ -48,6 +50,58 @@
 По [документации OpenRouter](https://openrouter.ai/docs/api_reference/limits), проверенной 14 октября 2026: бесплатные модели ограничены 20 запросами/минуту и обычно 50 запросами/день без покупки кредитов на $10; после этого порога — 1000/день. Покупка для старта не нужна. Один диалог агента может использовать несколько API-запросов на шаги ReAct. [Free router](https://openrouter.ai/openrouter/free/) выбирает совместимую бесплатную модель; для стабильных сравнений лучше закреплять конкретную.
 
 Данные прочитанных диапазонов передаются выбранному API. Для реальных финансовых моделей учитывай [настройки приватности OpenRouter](https://openrouter.ai/docs/guides/privacy/provider-logging) и [политику Groq](https://console.groq.com/docs/your-data). Бесплатный Gemini сейчас не выбран: [условия unpaid services](https://ai.google.dev/gemini-api/terms#unpaid-services) отдельно ограничивают передачу конфиденциальных данных. Наличие модели в каталоге Pi не означает, что ключ настроен и API доступен.
+
+### Свой OpenAI-совместимый провайдер
+
+Провайдер, которого нет в каталоге Pi (агрегатор RouterAI, внутренний API компании), описывается в `%USERPROFILE%\.pi\agent\models.json` (или `%PI_CODING_AGENT_DIR%\models.json`). Код Aperture2 для этого не меняется. Ключ в файл не пишется: `apiKey` ссылается на переменную окружения (`$ИМЯ`), и Pi подставляет её из своего окружения в момент запроса. Пример — RouterAI, проверенный 26 октября 2026:
+
+```json
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "routerai": {
+      "name": "RouterAI",
+      "baseUrl": "https://routerai.ru/api/v1",
+      "api": "openai-completions",
+      "apiKey": "$ROUTERAI_API_KEY",
+      "compat": { "supportsStore": false, "supportsDeveloperRole": false, "maxTokensField": "max_tokens", "thinkingFormat": "openrouter" },
+      "models": [
+        {
+          "id": "deepseek/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash (RouterAI)", "reasoning": true,
+          "thinkingLevelMap": { "off": "none", "minimal": null, "low": "low", "medium": null, "high": "high", "xhigh": null, "max": "max" },
+          "input": ["text"], "contextWindow": 1048576, "maxTokens": 65536,
+          "cost": { "input": 6.1846012371, "output": 24.7384049484, "cacheRead": 0.123692024742, "cacheWrite": 0 },
+          "compat": { "requiresReasoningContentOnAssistantMessages": true }
+        },
+        {
+          "id": "qwen/qwen3.8-27b", "name": "Qwen3.8 27B (RouterAI)", "reasoning": true,
+          "thinkingLevelMap": { "off": "none", "minimal": null, "low": "low", "medium": "medium", "high": null, "xhigh": "xhigh", "max": null },
+          "input": ["text"], "contextWindow": 1000000, "maxTokens": 65536,
+          "cost": { "input": 2.0939906, "output": 52.349765, "cacheRead": 0.94229577, "cacheWrite": 0 }
+        }
+      ]
+    }
+  }
+}
+```
+
+- Ключ задаётся один раз пользовательской переменной (`setx ROUTERAI_API_KEY <ключ>`). Она доходит только до новых процессов: перезапусти терминал или Excel. BenchHost читает её из пользовательского окружения сам (`--api-key-env`). Без переменной Pi не показывает модели провайдера: `node external\pi\packages\coding-agent\dist\bundle\cli.js --offline --list-models` выводит `routerai` только при заданном ключе.
+- Точные id моделей — из `GET https://routerai.ru/api/v1/models`. RouterAI повторяет API OpenRouter (`reasoning: {effort}`, `reasoning_details`, `usage.cost`, поле `provider` с выбранным апстримом), поэтому `compat` повторяет описание этих моделей в каталоге Pi для OpenRouter: `thinkingFormat: "openrouter"`, без роли `developer` и поля `store`, лимит ответа — `max_tokens`. DeepSeek в многоходовом диалоге с инструментами требует `reasoning_content` в сообщениях ассистента. `thinkingLevelMap` переводит уровни Pi в `reasoning.effort`; `null` — уровня нет, и Pi берёт соседний. Pi по умолчанию просит `medium`, для DeepSeek V4.1 Flash получается `high`. Карта Qwen перенесена из каталога OpenRouter и с RouterAI не проверялась.
+- `cost` — ставки за миллион токенов; Pi умножает на них токены и показывает как оценку. Для RouterAI ставки взяты из `/models` в рублях (валюта в ответе не указана, на сайте цены в рублях). Фактическое списание RouterAI бывает выше ставки каталога: 26.10.2026 запросы DeepSeek V4.1 Flash шли через апстрим BytePlus и стоили в 2,8 раза дороже. Поэтому BenchHost записывает стоимость из ответа провайдера (`usage.cost`), а расчёт Pi — отдельно как `cost_pi_estimate`. Ставки — снимок на дату проверки.
+- Usage: для `openai-completions` Pi всегда просит `stream_options.include_usage` и кладёт токены в `usage` сообщения ассистента (`message_end`). Для RouterAI проверено, что prompt/completion/cached/reasoning доходят до событий Pi и до `usage.json` BenchHost, а `usage.cost` совпадает с биллингом RouterAI (`GET /api/v1/generation?id=…`).
+
+Внутренний API подключается так же: свой `baseUrl`, `"api": "openai-completions"`, `"apiKey": "$INTERNAL_LLM_API_KEY"` и `models` с id, которые принимает этот API. `compat` добавляй только после проверки, что эндпоинт отличается от OpenAI (не принимает роль `developer`, `store`, `max_completion_tokens` и т. п.), а `cost` — если известны ставки:
+
+```json
+"internal": {
+  "baseUrl": "https://llm.example.corp/v1",
+  "api": "openai-completions",
+  "apiKey": "$INTERNAL_LLM_API_KEY",
+  "models": [{ "id": "internal-model", "contextWindow": 131072, "maxTokens": 16384 }]
+}
+```
+
+Панель берёт провайдера и модель из своих настроек; выбрать там RouterAI — Provider `routerai`, Model `deepseek/deepseek-v4.1-flash`.
 
 ## Архитектура
 
@@ -128,6 +182,64 @@ Smoke не доказывает качество LLM, визуальное уд�
 
 Подробные результаты и ограничения, включая очистку фонового тестового Excel после `Quit`: [отчёт технической проверки](docs/verification.md).
 
+## Безголовый запуск для бенчмарка
+
+`tools/BenchHost` запускает aperture2 без панели и без человека: один промпт, один агентный ход, записи прогона в `--run-dir`. Сессия создаётся тем же `PiSession` и `SessionConfiguration.Create`, что и в панели: тот же системный промпт, MCP `aperture_excel`, флаги Pi и привязка к книге через `target.json`. Модель и провайдер задаются на каждый прогон аргументами, без пересборки и без изменения настроек панели. Формат записей — контракт бенчмарка (§4 `harness_contract.md`). Собирается вместе с решением: `tools\BenchHost\bin\Debug\net48\BenchHost.exe`.
+
+1. Раннер сам открывает копию книги в своём экземпляре Excel и собирает `target.json` по PID этого Excel:
+
+   ```powershell
+   $env:PYTHONPATH = 'src'
+   .\.venv\Scripts\python.exe -m aperture_mcp.make_target --pid <PID EXCEL.EXE> --workbook <полный путь открытой книги> --out target.json
+   ```
+
+   `make_target` ищет книгу только в процессе с этим PID — через его окна, а запасным путём через ROT, отфильтрованный по PID. Excel не запускает, файл с диска не открывает, книгу не активирует и не сохраняет, COM-ссылок не держит. `excelInstanceId` и `workbookId` — новые GUID при каждом вызове. Голое имя без пути подходит только для несохранённой книги.
+2. Прогон:
+
+   ```powershell
+   .\tools\BenchHost\bin\Debug\net48\BenchHost.exe --bench --context target.json --prompt-file task.md `
+     --run-dir C:\bench\runs\audit\test_002\aperture2\t1 --timeout-s 3600 `
+     --provider routerai --model deepseek/deepseek-v4.1-flash --api-key-env ROUTERAI_API_KEY --cost-currency RUB
+   ```
+
+| Аргумент | Назначение |
+| --- | --- |
+| `--context`, `--prompt-file`, `--run-dir`, `--timeout-s` | обязательны; `run-dir` — новая папка на каждый прогон (занятую BenchHost не перезаписывает) |
+| `--provider`, `--model` | модель Pi на этот прогон; если Pi выбрал другую модель (нечёткое совпадение `--model`), прогон завершается `failed` |
+| `--thinking` | `off` … `max`; без него — уровень Pi по умолчанию, фактический пишется в `harness_info.json` |
+| `--api-key-env` | имя переменной с ключом: из окружения процесса, иначе из пользовательского (затем машинного) окружения; передаётся только дочернему Pi, значение нигде не записывается |
+| `--cost-currency` | валюта ставок и `usage.cost` провайдера для отчёта (для RouterAI — `RUB`); BenchHost её не проверяет |
+| `--bench` | разрешает чужой `target.json`; без флага принимаются только контексты из `.local\smoke`, как в модельном smoke |
+| `--root` | корень репозитория; по умолчанию — найденный над `BenchHost.exe` |
+
+| Файл в `run_dir` | Содержимое |
+| --- | --- |
+| `harness_info.json` | в начале: `harness: aperture2`, `contract_version: 1`, git SHA aperture2 (и признак незакоммиченных изменений), `external/pi`, `external/thepexcel`, хэши `BenchHost.exe` и `Aperture.Runtime.dll`, выбранная модель Pi со ставками и `compat`, уровень thinking, хэш системного промпта, инструменты MCP с описаниями, схемами и хэшами, конфигурация MCP |
+| `trajectory.jsonl` | по ходу: `llm_call`, `tool_call`, `retry`, `context_compaction`, в конце итоговое `message` |
+| `usage.json` | в конце: число вызовов, токены, стоимость, время в LLM и в инструментах, модели из ответов, `get_session_stats` Pi |
+| `done.json` | последним, атомарно (temp → rename): `state` (`done` / `failed` / `limit` / `cancelled`), `final_message`, `error`, время |
+| `pi_events.jsonl`, `pi_stderr.log` | каждое событие Pi как есть и диагностика stderr — для отладки |
+| `pi_state\` | папка сессии Pi: `aperture-system.md`, `.pi\mcp.json`, `target.json`, история |
+
+- `llm_call` строится из сообщения ассистента Pi (`message_end`): `usage` — `prompt` (вместе с кэшем), `completion` (вместе с reasoning), `cached`, `cache_write`, `reasoning`; `null`, если провайдер usage не прислал (например, оборванный поток). `model_returned` — модель из ответа провайдера; `provider` — апстрим, о котором сообщил агрегатор (у RouterAI — например `BytePlus`), `pi_provider` — провайдер Pi. `cost` — стоимость из ответа провайдера (`usage.cost`), `cost_pi_estimate` — оценка Pi по ставкам модели. Также `latency_ms`, `generation_id`, `finish_reason`, `stop_reason`, `error`. `http_status` всегда `null`: Pi RPC его не передаёт. Ретраи Pi — отдельные `llm_call` со своей ошибкой и событие `retry`.
+- `tool_call`: короткое имя, аргументы, `duration_ms`, `result_chars`, `is_error` и текст ошибки. Вызов, не завершившийся к концу прогона, записывается с `finished: false`: его эффект на книгу неизвестен.
+- `usage.json.cost` — сумма `usage.cost` провайдера (`cost_source: provider`); если провайдер стоимость не сообщает — оценка Pi (`pi_model_rates`) или `null`, когда ставок нет.
+- Хэш системного промпта: `sha256` — файла сессии целиком, включая строку привязки с ID этой книги; `template_sha256` — без неё, одинаковый у прогонов одной сборки.
+- Код возврата: 0 — `done`, 1 — `failed`, 2 — `limit`, 3 — `cancelled` (Ctrl+C), 64 — неверные аргументы или занятая `run-dir` (тогда файлы не пишутся).
+
+Отличия от панели — только наблюдательные. Перед промптом BenchHost отправляет Pi `/mcp` и `/aperture-status`: Pi обрабатывает их без запроса к модели и записи в историю, они дожидаются MCP и дают каталог инструментов. BenchHost подключает read-only расширение `aperture-usage.mjs` (`PiSessionOptions.RecordProviderUsage`): оно пересылает блок `usage` из потока провайдера, потому что сам Pi `usage.cost` отбрасывает. История Pi пишется в `run_dir\pi_state`, а не в `%LOCALAPPDATA%`.
+
+**Таймаут.** `--timeout-s` — бюджет по стенным часам от старта BenchHost, включая запуск Pi и MCP. По его истечении BenchHost прерывает ход через RPC `abort` (не дольше 10 с), затем останавливает Pi; Job Object добивает Pi и MCP. `done.json` получает `state: limit`. Отмена не откатывает уже выполненную COM-запись и не гарантирует остановку начатого COM-вызова. Книгу агент не сохраняет и не закрывает: таких инструментов нет, сохраняет раннер.
+
+Приёмка — отдельный видимый Excel со своей маленькой книгой, реальный запрос к модели, затем проверка таймаута:
+
+```powershell
+.\tools\BenchHost\smoke.ps1                        # RouterAI deepseek/deepseek-v4.1-flash, нужен ROUTERAI_API_KEY
+.\tools\BenchHost\smoke.ps1 -Provider openrouter -Model <id> -ApiKeyEnv OPENROUTER_API_KEY -CostCurrency USD
+```
+
+Smoke сохраняет книгу в `.local\smoke\bench-*`, заново открывает её с диска и строит `target.json` через `make_target`. BenchHost отправляет «Добавь в книгу лист «Аудит» и запиши в его ячейку A1 слово «тест»…». Проверяются все файлы `run_dir`, `llm_call` с usage и `tool_call`, лист «Аудит» с A1 = «тест» и единственной заполненной ячейкой, неизменность исходного листа и файла на диске. Процессы `node`/`python` этого прогона должны быть видны во время работы и отсутствовать после выхода. Затем длинный промпт с `--timeout-s 20` должен дать `limit` без хвостов и без изменения книги, после чего книга закрывается без сохранения и тестовый Excel завершается. Прогон 26.10.2026 стоил около 0,26 ₽.
+
 ## Структура и локальные данные
 
 | Путь | Содержимое |
@@ -138,7 +250,7 @@ Smoke не доказывает качество LLM, визуальное уд�
 | `src/aperture_mcp` | MCP-адаптер, точная COM-привязка и каталог |
 | `external/pi` | Pi 1.2.0, git `9fe3f371622cad9cc1a3cbf044288abd0252192f` |
 | `external/thepexcel` | ThepExcelMCP 0.2.2, git `bd3aac3e188c3f1277f8694b12b00c128db773db` |
-| `tests`, `tools` | Тесты backend/runtime/панели и live smoke |
+| `tests`, `tools` | Тесты backend/runtime/панели, live smoke и безголовый `tools/BenchHost` для бенчмарка |
 
 Настройки: `%LOCALAPPDATA%\Aperture2\settings.json`. Истории Pi и привязки: `%LOCALAPPDATA%\Aperture2\sessions`. Профиль WebView2: `%LOCALAPPDATA%\Aperture2\webview2`. Логи VSTO: `%LOCALAPPDATA%\Aperture2\logs` (без промптов и содержимого ячеек). Истории сессий могут содержать данные книг; они локальны и не включаются в Git. Авторизация остаётся в стандартном хранилище Pi.
 

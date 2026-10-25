@@ -4,9 +4,12 @@ export default function apertureStatus(pi) {
   pi.registerCommand("aperture-status", {
     description: "Show the tools actually loaded in this Aperture session",
     handler: async (_args, ctx) => {
+      const excel = pi.getAllTools().filter(t => t.name.startsWith("mcp__aperture_excel__"));
       ctx.ui.notify("APERTURE_STATUS " + JSON.stringify({
         activeTools: pi.getActiveTools(),
-        excelTools: pi.getAllTools().filter(t => t.name.startsWith("mcp__aperture_excel__")).map(t => t.name)
+        excelTools: excel.map(t => t.name),
+        // Tool definitions as registered in Pi, for run records (BenchHost harness_info).
+        excelToolDefinitions: excel.map(t => ({ name: t.name, description: t.description, parameters: t.parameters }))
       }), "info");
     }
   });

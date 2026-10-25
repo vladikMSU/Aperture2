@@ -30,6 +30,10 @@ namespace Aperture.Runtime
         public string PythonPath { get; set; }
         public string Provider { get; set; }
         public string Model { get; set; }
+        /// <summary>Optional Pi --thinking level; empty keeps Pi's own default.</summary>
+        public string Thinking { get; set; }
+        /// <summary>Loads a read-only observer that reports provider usage blocks (BenchHost run records).</summary>
+        public bool RecordProviderUsage { get; set; }
         public string StateRoot { get; set; }
         public bool EnableExcelTools { get; set; } = true;
         public int CommandTimeoutSeconds { get; set; } = 45;

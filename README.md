@@ -237,6 +237,6 @@ Excel B держит открытую панель, Excel A выполняет `
 | `external/thepexcel` | ThepExcelMCP 0.2.2, git `bd3aac3e188c3f1277f8694b12b00c128db773db` |
 | `tests`, `tools` | Тесты backend/runtime/панели, live smoke и smoke COM-входа |
 
-Настройки: `%LOCALAPPDATA%\Aperture2\settings.json`. Истории Pi и привязки: `%LOCALAPPDATA%\Aperture2\sessions`. Профиль WebView2: `%LOCALAPPDATA%\Aperture2\webview2`. Логи VSTO: `%LOCALAPPDATA%\Aperture2\logs` (без промптов и содержимого ячеек). Истории сессий могут содержать данные книг; они локальны и не включаются в Git. Авторизация остаётся в стандартном хранилище Pi.
+Настройки: `%LOCALAPPDATA%\Aperture2\settings.json`. Истории Pi и привязки: `%LOCALAPPDATA%\Aperture2\sessions`. Профиль WebView2: `%LOCALAPPDATA%\Aperture2\webview2`, общий для всех Excel; пока работает Excel с другими опциями WebView2 (например, с `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` для CDP), панели остальных Excel получают `0x8007139F` ([отчёт проверки](docs/verification.md)). Логи VSTO: `%LOCALAPPDATA%\Aperture2\logs` (без промптов и содержимого ячеек). Истории сессий могут содержать данные книг; они локальны и не включаются в Git. Авторизация остаётся в стандартном хранилище Pi.
 
 Лицензии: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Инструкции для агентов: [AGENTS.md](AGENTS.md).

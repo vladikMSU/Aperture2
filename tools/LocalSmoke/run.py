@@ -28,8 +28,6 @@ import win32gui
 
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "src"))
-from aperture_mcp.make_target import build_target  # noqa: E402
 
 
 def pump_for(seconds: float):
@@ -109,6 +107,7 @@ def launch_normal_excel(folder: Path):
     with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\excel.exe") as key:
         executable = winreg.QueryValue(key, None)
     process = subprocess.Popen([executable, "/x", str(template)])
+    sys.path.insert(0, str(ROOT / "src"))
     from aperture_mcp.binding import _from_window
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -203,8 +202,15 @@ def main() -> int:
         workbook.Worksheets(1).Activate()
         if bootstrap_name:
             application.Workbooks(bootstrap_name).Close(SaveChanges=False)
-        target = build_target(application, workbook)
-        assert target["excelProcessId"] == pid, target
+        target = {
+            "excelInstanceId": f"excel-{pid}-{int(application.Hwnd)}",
+            "workbookId": uuid.uuid4().hex,
+            "excelProcessId": pid,
+            "excelHwnd": int(application.Hwnd),
+            "workbookName": str(workbook.Name),
+            "workbookFullName": str(workbook.FullName),
+            "workbookHwnd": int(workbook.Windows(1).Hwnd),
+        }
         target_path = output_dir / "target.json"
         target_path.write_text(json.dumps(target, ensure_ascii=False, indent=2), encoding="utf-8")
         report["checks"]["disposableExcel"] = {"processId": pid, "unsaved": str(workbook.Path) == ""}

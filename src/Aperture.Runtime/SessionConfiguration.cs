@@ -90,12 +90,10 @@ namespace Aperture.Runtime
                 "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--offline",
                 "--system-prompt", instructions, "--session-dir", Path.Combine(dir, "history"), "--name", "Aperture Excel" };
             args.AddRange(new[] { "--extension", Path.Combine(root, "src", "Aperture.Runtime", "aperture-status.mjs") });
-            if (options.RecordProviderUsage) args.AddRange(new[] { "--extension", Path.Combine(root, "src", "Aperture.Runtime", "aperture-usage.mjs") });
             if (options.EnableExcelTools) args.AddRange(new[] { "--extension", "builtin:mcp", "--tools", "mcp__aperture_excel__*" });
             else args.Add("--no-mcp");
             if (!string.IsNullOrWhiteSpace(options.Model)) args.AddRange(new[] { "--model", options.Model });
             if (!string.IsNullOrWhiteSpace(options.Provider)) args.AddRange(new[] { "--provider", options.Provider });
-            if (!string.IsNullOrWhiteSpace(options.Thinking)) args.AddRange(new[] { "--thinking", options.Thinking });
             return new SessionConfiguration { Directory = dir, Node = node, Arguments = string.Join(" ", args.Select(Quote)) };
         }
 

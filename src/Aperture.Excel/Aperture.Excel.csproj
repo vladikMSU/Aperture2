@@ -92,6 +92,7 @@
       <DependentUpon>ThisAddIn.cs</DependentUpon>
     </None>
     <Compile Include="ApertureRibbon.cs" />
+    <EmbeddedResource Include="Resources\Aperture2.png" />
     <Compile Include="ChatPaneControl.cs">
       <SubType>UserControl</SubType>
     </Compile>

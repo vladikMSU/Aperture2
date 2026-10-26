@@ -48,7 +48,7 @@ def visible_windows_for_process(pid: int) -> list[int]:
 
 
 def pane_snapshot(automation, expected_hwnds: set[int], require_view: bool = True) -> dict:
-    status = json.loads(str(automation.StatusJson()))
+    status = json.loads(str(automation.GetInfo()))
     panes = {pane["windowHwnd"]: pane for pane in status["panes"]}
     assert status.get("loaded") is True, status
     assert status["paneCount"] == len(expected_hwnds), status
@@ -233,9 +233,8 @@ def main() -> int:
                 raise RuntimeError("Aperture.Excel did not connect automatically during normal Excel startup. " + recovery)
             automation = addin.Object
             if automation is None:
-                raise RuntimeError("VSTO loaded without its diagnostics automation service.")
-            automation.ShowPane()
-            status = json.loads(str(automation.StatusJson()))
+                raise RuntimeError("VSTO loaded without its automation service.")
+            status = json.loads(str(automation.GetInfo()))
             report["checks"]["vsto"] = status
             assert status.get("loaded") is True, status
             assert status.get("paneCount", 0) >= 1, status

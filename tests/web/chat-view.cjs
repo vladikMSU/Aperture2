@@ -81,6 +81,15 @@ function check(actual, expected, message) {
     check((await lastSent()).command, 'rebind', 'Rebind must reach the bridge.');
     await page.locator('#new-chat').click();
     check((await lastSent()).command, 'new_chat', 'New chat must reach the bridge.');
+    // A request started through the add-in's automation: the draft stays, but cannot be edited or sent.
+    await receive({ type: 'scripted', active: true });
+    await receive({ type: 'busy', busy: true, canStop: true });
+    check(await page.locator('#prompt').evaluate(node => node.readOnly), true, 'A scripted request must lock the composer.');
+    check(await page.locator('#prompt').inputValue(), 'Черновик следующего вопроса', 'A scripted request must keep the draft.');
+    check(await page.locator('#stop').isDisabled(), false, 'Stop must stay available during a scripted request.');
+    await receive({ type: 'busy', busy: false, canStop: true });
+    await receive({ type: 'scripted', active: false });
+    check(await page.locator('#prompt').evaluate(node => node.readOnly), false, 'The composer must unlock after the scripted request.');
 
     // ---------------------------------------------------------------- one request: chronological timeline
     await receive({ type: 'clear_transcript' });

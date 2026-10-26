@@ -127,6 +127,7 @@ internal static class PaneLifecycleHarness
         await VerifyActivityAsync();
         await VerifyPromptDispositionAsync();
         await VerifyToolCallFormationAsync();
+        await VerifyScriptedRunAsync();
         Console.WriteLine("PASS: " + assertions + " total pane lifecycle/thread assertions (actual controls and handles; fake Pi/COM; no Excel/model).");
     }
 
@@ -485,6 +486,117 @@ internal static class PaneLifecycleHarness
                 (string)item["message"]?["content"]?[0]?["id"] == "fallback") &&
                 !view.Transcript.Exists(text => text.StartsWith("Инструмент:")), "Fallback tool call was lost or duplicated as a plain message.");
         }
+    }
+
+    private static async Task UntilAsync(Control pane, Func<bool> condition, string message)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) throw new Exception(message);
+            await Task.Delay(20);
+            await FlushUi(pane);
+        }
+    }
+
+    private static async Task<PiSession> StartScriptedAsync(ChatPaneControl pane, ScriptedRun run)
+    {
+        pane.StartScripted("  scripted audit  ", "routerai", "deepseek/test", run);
+        var running = new PiSession();
+        await Task.Run(() => PiSession.StartGate.SetResult(running));
+        await UntilAsync(pane, () => PiSession.Prompts == 1, "The scripted prompt was not sent.");
+        return running;
+    }
+
+    private static async Task VerifyScriptedRunAsync()
+    {
+        Console.WriteLine("CASE: automation Start begins a new chat with its own model, locks the composer and reports done.");
+        ResetFake();
+        using (var pane = CreatePane())
+        {
+            var view = View(pane);
+            var old = new PiSession();
+            Set(pane, "session", old);
+            view.AppendMessage("Вы", "earlier question");
+            var run = new ScriptedRun();
+            pane.StartScripted("  scripted audit  ", "routerai", "deepseek/test", run);
+            Check(Field<bool>(pane, "busy") && view.Scripted && run.State == "running", "Start did not take the chat synchronously.");
+            var refused = false;
+            try { pane.StartScripted("second", null, null, new ScriptedRun()); }
+            catch (InvalidOperationException) { refused = true; }
+            Check(refused, "A busy chat accepted a second scripted Start.");
+            var running = new PiSession();
+            await Task.Run(() => PiSession.StartGate.SetResult(running));
+            await UntilAsync(pane, () => PiSession.Prompts == 1, "The scripted prompt was not sent.");
+            Check(old.Disposed, "Start did not end the previous chat session.");
+            var options = (PaneSettings)PiSession.LastOptions;
+            Check(options.Provider == "routerai" && options.Model == "deepseek/test", "The script's provider and model did not reach Pi.");
+            Check(view.Transcript.Count == 1 && view.Transcript[0] == "Вы: scripted audit", "Start did not open a new chat with the typed prompt.");
+            Check(!view.PromptCleared, "Start cleared a draft typed in the pane.");
+            Check(run.LogPath == "history.jsonl", "The chat's Pi history path was not reported.");
+            await EmitAsync(pane, running, "{type:'agent_settled',aborted:false}");
+            Check(run.State == "done" && run.Error == null && !view.Scripted && !Field<bool>(pane, "busy"),
+                "A settled scripted request was not reported as done.");
+
+            await CallWithoutContext(pane, "SendAsync");
+            Check(PiSession.Prompts == 2 && PiSession.Starts == 1, "A follow-up in the scripted chat did not reuse its session.");
+            await EmitAsync(pane, running, "{type:'agent_settled',aborted:false}");
+            Check(run.State == "done", "A later request rewrote the finished scripted run.");
+            ResetFake();
+            await CallWithoutContext(pane, "ResetChatAsync");
+            await StartSessionAsync(pane);
+            Check(((PaneSettings)PiSession.LastOptions).Provider == null, "The script's model outlived its chat.");
+        }
+
+        Console.WriteLine("CASE: automation Start refused while another window runs; startup failure reports failed.");
+        ResetFake();
+        using (var pane = new ChatPaneControl(() => new WorkbookBinding(), () => false, () => { }))
+        {
+            CreateHandles(pane);
+            var refused = false;
+            try { pane.StartScripted("audit", null, null, new ScriptedRun()); }
+            catch (InvalidOperationException) { refused = true; }
+            Check(refused && !Field<bool>(pane, "busy") && !View(pane).Scripted, "Start ran while another window held the turn.");
+        }
+        using (var pane = CreatePane())
+        {
+            var run = new ScriptedRun();
+            pane.StartScripted("audit", null, null, run);
+            await Task.Run(() => PiSession.StartGate.SetException(new InvalidOperationException("test startup failure")));
+            await UntilAsync(pane, () => run.State != "running", "A failed scripted startup stayed running.");
+            Check(run.State == "failed" && run.Error == "test startup failure" && !View(pane).Scripted, "Startup failure was not reported as failed.");
+        }
+
+        Console.WriteLine("CASE: automation Cancel is the Stop button; an unresponsive Pi is ended after the stop budget.");
+        ResetFake();
+        using (var pane = CreatePane())
+        {
+            var run = new ScriptedRun();
+            var running = await StartScriptedAsync(pane, run);
+            pane.Stop();
+            await UntilAsync(pane, () => run.State != "running", "Cancel did not end the scripted request.");
+            Check(run.State == "cancelled" && !running.Disposed && !Field<bool>(pane, "busy"), "A confirmed Stop was not reported as cancelled.");
+        }
+        ResetFake();
+        var delay = typeof(ChatPaneControl).GetField("forcedStopDelay", BindingFlags.Static | BindingFlags.NonPublic);
+        var budget = delay.GetValue(null);
+        delay.SetValue(null, TimeSpan.FromMilliseconds(200));
+        try
+        {
+            using (var pane = CreatePane())
+            {
+                var run = new ScriptedRun();
+                var running = await StartScriptedAsync(pane, run);
+                running.AbortGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                pane.Stop();
+                await UntilAsync(pane, () => run.State != "running", "An unanswered Stop never ended the request.");
+                Check(run.State == "cancelled" && running.Disposed && !Field<bool>(pane, "busy") && Field<PiSession>(pane, "session") == null,
+                    "The forced stop did not end this chat's Pi.");
+                Check(View(pane).Transcript.Exists(text => text.StartsWith("Система: Агент не остановился")), "The forced stop was not explained in the chat.");
+                running.AbortGate.SetResult(true);
+            }
+        }
+        finally { delay.SetValue(null, budget); }
     }
 
     [STAThread]

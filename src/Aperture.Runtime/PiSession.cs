@@ -31,6 +31,10 @@ namespace Aperture.Runtime
         public event EventHandler<PiEvent> EventReceived;
         public event EventHandler<PiDiagnosticEventArgs> StandardError;
         public string SessionDirectory { get; }
+        /// <summary>Pi's JSONL history of this chat, reported by get_state. Pi creates the file with the first message.</summary>
+        public string SessionFile { get; private set; }
+        /// <summary>SHA-256 of the system prompt shared by all chats, without the per-chat binding line.</summary>
+        public static string SystemPromptSha256 => SessionConfiguration.SystemPromptSha256;
         public int ProcessId => process.Id;
         public bool IsRunning => Volatile.Read(ref disposed) == 0 && !process.HasExited;
 
@@ -58,6 +62,7 @@ namespace Aperture.Runtime
             };
             process.StartInfo.EnvironmentVariables["PI_SKIP_VERSION_CHECK"] = "1";
             process.StartInfo.EnvironmentVariables["PI_TELEMETRY"] = "0";
+            foreach (var key in config.ProviderEnvironment) process.StartInfo.EnvironmentVariables[key.Key] = key.Value;
             process.Exited += (sender, args) => exited.TrySetResult(true);
             try
             {
@@ -89,7 +94,8 @@ namespace Aperture.Runtime
             try
             {
                 await session.input.WriteAsync("\n").ConfigureAwait(false); // release process gate only after job assignment
-                await session.GetStateAsync(cancellationToken).ConfigureAwait(false);
+                var state = await session.GetStateAsync(cancellationToken).ConfigureAwait(false);
+                session.SessionFile = (string)state["data"]?["sessionFile"];
                 return session;
             }
             catch (Exception error)

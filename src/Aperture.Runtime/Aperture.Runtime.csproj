@@ -9,4 +9,16 @@
   </ItemGroup>
   <!-- Pi bundle and Python MCP environment that this runtime starts. -->
   <Import Project="..\..\build\Aperture.Dependencies.targets" />
+  <!-- The built commit ("-dirty" with uncommitted tracked changes) goes into
+       AssemblyInformationalVersion after "+"; the add-in reports it in GetInfo. -->
+  <Target Name="ApertureSourceRevision" BeforeTargets="InitializeSourceControlInformation" Condition="'$(SourceRevisionId)' == ''">
+    <Exec Command="git describe --always --dirty --abbrev=40 --exclude=*" WorkingDirectory="$(MSBuildProjectDirectory)"
+          ConsoleToMSBuild="true" StandardOutputImportance="low" IgnoreExitCode="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ApertureDescribe" />
+      <Output TaskParameter="ExitCode" PropertyName="_ApertureDescribeExitCode" />
+    </Exec>
+    <PropertyGroup Condition="'$(_ApertureDescribeExitCode)' == '0'">
+      <SourceRevisionId>$(_ApertureDescribe.Trim())</SourceRevisionId>
+    </PropertyGroup>
+  </Target>
 </Project>

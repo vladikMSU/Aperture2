@@ -42,6 +42,15 @@ namespace Aperture.Excel
             File.WriteAllText(SettingsPath, JsonConvert.SerializeObject(this, Formatting.Indented));
         }
 
+        // Another provider and model for one chat; the copy is never saved.
+        internal PaneSettings WithModel(string provider, string model)
+        {
+            var copy = (PaneSettings)MemberwiseClone();
+            copy.Provider = provider;
+            copy.Model = model;
+            return copy;
+        }
+
         internal PiSessionOptions ToOptions()
         {
             return new PiSessionOptions

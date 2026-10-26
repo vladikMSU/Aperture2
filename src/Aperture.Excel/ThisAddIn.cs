@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using Aperture.Runtime;
 using Newtonsoft.Json;
 using ExcelInterop = Microsoft.Office.Interop.Excel;
 using Office = Microsoft.Office.Core;
@@ -13,9 +15,11 @@ namespace Aperture.Excel
     {
         private readonly string instanceId = Guid.NewGuid().ToString("N");
         private readonly Dictionary<int, PaneEntry> panes = new Dictionary<int, PaneEntry>();
-        private AddInAutomation automation;
+        private AgentAutomation automation;
         private bool loaded;
         private int? runningWindow;
+        private ScriptedRun scriptedRun;
+        private int scriptedWindow;
         private System.Windows.Forms.Timer paneCleanupTimer;
 
         private void ThisAddIn_Startup(object sender, EventArgs args)
@@ -26,7 +30,7 @@ namespace Aperture.Excel
             paneCleanupTimer.Tick += PruneClosedPanes;
             paneCleanupTimer.Start();
             Diagnostics.Write("addin_loaded", "version=0.1.0");
-            try { EnsureActivePane(false); }
+            try { EnsureActivePane(); }
             catch (Exception ex) { Diagnostics.Write("initial_pane_deferred", ex.GetType().Name); }
         }
 
@@ -40,7 +44,7 @@ namespace Aperture.Excel
         {
             try
             {
-                var entry = EnsureActivePane(false);
+                var entry = EnsureActivePane();
                 if (entry != null) entry.Pane.Visible = !entry.Pane.Visible;
             }
             catch (Exception ex)
@@ -49,22 +53,10 @@ namespace Aperture.Excel
             }
         }
 
-        internal void ShowPane()
-        {
-            EnsureActivePane(true);
-        }
-
-        private PaneEntry EnsureActivePane(bool show)
+        private PaneEntry EnsureActivePane()
         {
             var window = Application.ActiveWindow;
-            if (window == null)
-            {
-                if (show) throw new InvalidOperationException("Откройте книгу Excel, чтобы показать панель Aperture2.");
-                return null;
-            }
-            var entry = EnsurePane(window);
-            if (show) entry.Pane.Visible = true;
-            return entry;
+            return window == null ? null : EnsurePane(window);
         }
 
         private PaneEntry EnsurePane(ExcelInterop.Window window)
@@ -160,15 +152,69 @@ namespace Aperture.Excel
 
         protected override object RequestComAddInAutomationService()
         {
-            return automation ?? (automation = new AddInAutomation(this));
+            return automation ?? (automation = new AgentAutomation(this));
         }
 
-        internal string StatusJson()
+        // Automation calls arrive on Excel's UI thread (AgentAutomation is a StandardOleMarshalObject).
+        internal void StartScripted(string workbookName, string prompt, string provider, string model)
+        {
+            if (String.IsNullOrWhiteSpace(prompt)) throw new ArgumentException("Пустой промпт.");
+            if (!String.IsNullOrWhiteSpace(provider) && String.IsNullOrWhiteSpace(model))
+                throw new ArgumentException("Вместе с провайдером нужна модель.");
+            var window = FindWorkbookWindow(workbookName);
+            var entry = EnsurePane(window);
+            entry.Pane.Visible = true;
+            var run = new ScriptedRun();
+            entry.Control.StartScripted(prompt, provider?.Trim(), model?.Trim(), run);
+            scriptedRun = run;
+            scriptedWindow = window.Hwnd;
+            Diagnostics.Write("scripted_start", "window=" + scriptedWindow);
+        }
+
+        private ExcelInterop.Window FindWorkbookWindow(string workbookName)
+        {
+            var name = (workbookName ?? "").Trim();
+            var books = Application.Workbooks;
+            for (var index = 1; index <= books.Count && name.Length != 0; index++)
+            {
+                var book = books[index];
+                if (String.Equals(book.Name, name, StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(book.FullName, name, StringComparison.OrdinalIgnoreCase)) return book.Windows[1];
+            }
+            throw new InvalidOperationException("Книга «" + name + "» не открыта в этом экземпляре Excel.");
+        }
+
+        internal string ScriptedStateJson()
         {
             return JsonConvert.SerializeObject(new
             {
+                state = scriptedRun == null ? "idle" : scriptedRun.State,
+                log_path = scriptedRun?.LogPath,
+                error = scriptedRun?.Error
+            });
+        }
+
+        internal void CancelScripted()
+        {
+            PaneEntry entry;
+            if (scriptedRun != null && scriptedRun.State == "running" && panes.TryGetValue(scriptedWindow, out entry))
+                entry.Control.Stop();
+        }
+
+        internal string InfoJson()
+        {
+            // Aperture.Runtime carries the built commit after "+" (see its csproj).
+            var runtimeVersion = typeof(PiSession).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "";
+            var plus = runtimeVersion.IndexOf('+');
+            return JsonConvert.SerializeObject(new
+            {
+                name = "Aperture2",
+                version = typeof(ThisAddIn).Assembly.GetName().Version.ToString(3),
+                commit = plus < 0 ? null : runtimeVersion.Substring(plus + 1),
+                build = typeof(ThisAddIn).Assembly.ManifestModule.ModuleVersionId.ToString("N"),
+                systemPromptSha256 = PiSession.SystemPromptSha256,
+                repositoryRoot = PaneSettings.Load().RepositoryRoot,
                 loaded,
-                version = "0.1.0",
                 excelProcessId = Process.GetCurrentProcess().Id,
                 excelInstanceId = instanceId,
                 paneCount = panes.Values.Count(p => !p.Control.IsDisposed),
@@ -212,25 +258,5 @@ namespace Aperture.Excel
             internal WindowLifetime Lifetime;
             internal string PaneId;
         }
-    }
-
-    [ComVisible(true)]
-    [Guid("5A264C27-63D5-4ECC-934A-32B3471B0B6E")]
-    [InterfaceType(ComInterfaceType.InterfaceIsDual)]
-    public interface IAddInAutomation
-    {
-        string StatusJson();
-        void ShowPane();
-    }
-
-    [ComVisible(true)]
-    [Guid("168017DD-4C4A-48A8-9B3C-C1461F0D5983")]
-    [ClassInterface(ClassInterfaceType.None)]
-    public sealed class AddInAutomation : StandardOleMarshalObject, IAddInAutomation
-    {
-        private readonly ThisAddIn addIn;
-        internal AddInAutomation(ThisAddIn addIn) { this.addIn = addIn; }
-        public string StatusJson() { return addIn.StatusJson(); }
-        public void ShowPane() { addIn.ShowPane(); }
     }
 }

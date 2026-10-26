@@ -18,6 +18,8 @@ namespace Aperture.Excel
         private readonly CancellationTokenSource dispatchLifetime = new CancellationTokenSource();
         private WorkbookBinding binding;
         private PaneSettings settings;
+        private PaneSettings chatSettings; // the script's provider/model, for this chat only
+        private ScriptedRun scriptedRun;
         private PiSession session;
         private bool busy;
         private string runError;
@@ -27,6 +29,8 @@ namespace Aperture.Excel
         private bool transitioning;
         private int operationVersion;
         private CancellationTokenSource startupCancellation;
+        // Pi's abort waits for running tools; past this budget Stop ends the chat's own Pi/MCP.
+        private static TimeSpan forcedStopDelay = TimeSpan.FromSeconds(8);
 
         internal string BoundWorkbookId { get { return binding == null ? null : binding.Target.WorkbookId; } }
         internal bool SessionRunning { get { return session != null && session.IsRunning; } }
@@ -55,7 +59,12 @@ namespace Aperture.Excel
             TryCaptureWorkbook();
         }
 
-        private void ViewCommand(object sender, ChatPaneCommandEventArgs args)
+        private void ViewCommand(object sender, ChatPaneCommandEventArgs args) { RunCommand(args.Command, args.Text); }
+
+        // The automation's Cancel is the Stop button.
+        internal void Stop() { RunCommand("stop", null); }
+
+        private void RunCommand(string command, string text)
         {
             if (disposed || !IsHandleCreated) return;
             // Leave the WebView callback before a command can open a modal settings dialog.
@@ -64,9 +73,9 @@ namespace Aperture.Excel
                 if (disposed) return;
                 try
                 {
-                    switch (args.Command)
+                    switch (command)
                     {
-                        case "send": await SendAsync(args.Text); break;
+                        case "send": await SendAsync(text); break;
                         case "stop": await AbortAsync(); break;
                         case "rebind": await RebindAsync(); break;
                         case "new_chat": await ResetChatAsync(); break;
@@ -76,7 +85,7 @@ namespace Aperture.Excel
                 catch (Exception ex)
                 {
                     Diagnostics.Write("pane_command_failed", ex.GetType().Name);
-                    await OnUiAsync(() => { EndActivity("error"); SetBusy(false); SetStatus(ex.Message, true); });
+                    await OnUiAsync(() => { runError = ex.Message; EndRun("error"); SetStatus(ex.Message, true); });
                 }
             }));
         }
@@ -100,22 +109,50 @@ namespace Aperture.Excel
         private async Task SendAsync(string text)
         {
             if (disposed || busy || String.IsNullOrWhiteSpace(text)) return;
-            text = text.Trim();
-            var operation = ++operationVersion;
+            await SubmitAsync(text.Trim(), ++operationVersion, false);
+        }
+
+        // The automation's Start, on Excel's UI thread: a new chat with the script's provider and
+        // model, then the prompt as if typed. Refusals throw before anything starts; the request
+        // itself runs asynchronously and reports to run.
+        internal void StartScripted(string text, string provider, string model, ScriptedRun run)
+        {
+            if (disposed || !IsHandleCreated) throw new InvalidOperationException("Панель Aperture2 этой книги не открыта: окно Excel должно быть видимым.");
+            if (busy) throw new InvalidOperationException("Чат этой книги занят: дождитесь конца запроса или остановите его.");
+            if (BindingValidationError() != null) TryCaptureWorkbook();
+            Admit();
+            scriptedRun = run;
+            chatSettings = String.IsNullOrWhiteSpace(provider) && String.IsNullOrWhiteSpace(model) ? null : settings.WithModel(provider, model);
+            runError = null;
+            runStopped = false;
+            view.SetScripted(true);
+            SubmitAsync(text.Trim(), ++operationVersion, true).ContinueWith(
+                task => Diagnostics.Write("scripted_request_failed", task.Exception.GetBaseException().GetType().Name),
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        }
+
+        private void Admit()
+        {
+            if (binding == null) throw new InvalidOperationException("Откройте книгу и нажмите «Привязать».");
+            binding.Validate();
+            if (!acquireTurn()) throw new InvalidOperationException("В другом окне Excel уже выполняется запрос Aperture2.");
+            SetBusy(true);
+        }
+
+        // A scripted request was admitted by StartScripted and always begins a new chat.
+        private async Task SubmitAsync(string text, int operation, bool scripted)
+        {
             CancellationTokenSource pendingStart = null;
             try
             {
-                if (binding == null) throw new InvalidOperationException("Откройте книгу и нажмите «Привязать».");
-                binding.Validate();
-                if (!acquireTurn()) throw new InvalidOperationException("В другом окне Excel уже выполняется запрос Aperture2.");
-                SetBusy(true);
+                if (!scripted) Admit();
                 pendingStart = new CancellationTokenSource();
                 startupCancellation = pendingStart;
-                if (session == null || !session.IsRunning)
+                if (scripted || session == null || !session.IsRunning)
                 {
                     // Snapshot context on the owning thread; Office may provide no
                     // SynchronizationContext, so no code after await assumes UI affinity.
-                    var options = settings.ToOptions();
+                    var options = (chatSettings ?? settings).ToOptions();
                     var target = binding.Target;
                     await DisposeSessionAsync().ConfigureAwait(false);
                     var shouldStart = false;
@@ -124,6 +161,7 @@ namespace Aperture.Excel
                         if (!IsCurrentOperation(operation)) return;
                         pendingStart.Token.ThrowIfCancellationRequested();
                         shouldStart = true;
+                        if (scripted) view.ClearTranscript();
                         SetStatus("Подключаю агента…");
                     });
                     if (!shouldStart) return;
@@ -137,6 +175,7 @@ namespace Aperture.Excel
                             session = started;
                             session.EventReceived += SessionEvent;
                             session.StandardError += SessionDiagnostic;
+                            if (scriptedRun != null) scriptedRun.LogPath = session.SessionFile;
                             installed = true;
                             Diagnostics.Write("pi_session_started");
                         });
@@ -155,7 +194,7 @@ namespace Aperture.Excel
                     runStopped = false;
                     view.AppendMessage("Вы", text);
                     activityOwned = true;
-                    view.ClearPrompt();
+                    if (!scripted) view.ClearPrompt(); // a draft typed in the pane is not the script's
                     SetStatus("Думаю…");
                     // Admit the async RPC write before a subsequent UI Stop command.
                     // Only initiation occurs here; all network/process waiting stays async.
@@ -174,7 +213,7 @@ namespace Aperture.Excel
                         {
                             if (!IsCurrentOperation(operation) || !ReferenceEquals(promptSession, session)) return;
                             if ((bool?)state["data"]?["isStreaming"] == false)
-                            { EndActivity("done"); SetBusy(false); SetStatus("Команда выполнена"); }
+                            { EndRun("done"); SetStatus("Команда выполнена"); }
                         });
                     }
                 }
@@ -183,7 +222,7 @@ namespace Aperture.Excel
             {
                 await OnUiAsync(() =>
                 {
-                    if (IsCurrentOperation(operation)) { EndActivity("stopped"); SetBusy(false); SetStatus("Запуск отменён · запрос не отправлен"); }
+                    if (IsCurrentOperation(operation)) { EndRun("stopped"); SetStatus("Запуск отменён · запрос не отправлен"); }
                 });
             }
             catch (Exception ex)
@@ -197,7 +236,7 @@ namespace Aperture.Excel
                         SetStatus("Статус запроса неизвестен · остановите агента перед повтором", true);
                         view.SetBusy(true, true);
                     }
-                    else { runError = ex.Message; EndActivity("error"); SetStatus("Не удалось выполнить запрос", true); SetBusy(false); }
+                    else { runError = ex.Message; EndRun("error"); SetStatus("Не удалось выполнить запрос", true); }
                 });
                 Diagnostics.Write("request_failed", ex.GetType().Name);
             }
@@ -218,6 +257,7 @@ namespace Aperture.Excel
             SetStatus("Останавливаю…");
             var current = session;
             if (current == null) return;
+            ForceStopLater(current, operation);
             try
             {
                 await current.AbortAsync().ConfigureAwait(false);
@@ -226,7 +266,7 @@ namespace Aperture.Excel
                 {
                     if (!IsCurrentOperation(operation) || !ReferenceEquals(current, session)) return;
                     if ((bool?)state["data"]?["isStreaming"] == false)
-                    { EndActivity("stopped"); SetBusy(false); SetStatus("Ответ остановлен"); }
+                    { EndRun("stopped"); SetStatus("Ответ остановлен"); }
                 });
             }
             catch (Exception ex)
@@ -235,10 +275,27 @@ namespace Aperture.Excel
                 {
                     if (!IsCurrentOperation(operation) || !ReferenceEquals(current, session)) return;
                     view.AppendMessage("Ошибка остановки", ex.Message);
-                    if (!current.IsRunning) { EndActivity("error"); SetBusy(false); SetStatus("Агент остановлен с ошибкой", true); }
+                    if (!current.IsRunning) { runError = ex.Message; EndRun("error"); SetStatus("Агент остановлен с ошибкой", true); }
                     else { view.SetBusy(true, true); SetStatus("Остановка не подтверждена · дождитесь завершения", true); }
                 });
             }
+        }
+
+        private void ForceStopLater(PiSession current, int operation)
+        {
+            Task.Delay(forcedStopDelay).ContinueWith(_ => OnUi(() =>
+            {
+                if (!busy || !IsCurrentOperation(operation) || !ReferenceEquals(current, session)) return;
+                // Only this chat's Pi/MCP tree is terminated; Excel and its books stay untouched.
+                Diagnostics.Write("stop_forced");
+                session = null;
+                current.EventReceived -= SessionEvent;
+                current.StandardError -= SessionDiagnostic;
+                current.Dispose();
+                view.AppendMessage("Система", "Агент не остановился за " + forcedStopDelay.TotalSeconds + " с, его процесс завершён. Следующий запрос начнёт новую сессию.");
+                EndRun("stopped");
+                SetStatus("Ответ остановлен · сессия завершена");
+            }), TaskScheduler.Default);
         }
 
         private async Task RebindAsync()
@@ -282,6 +339,7 @@ namespace Aperture.Excel
         {
             var operation = ++operationVersion;
             transitioning = true;
+            chatSettings = null; // a new chat or binding returns to the saved settings
             startupCancellation?.Cancel();
             SetBusy(true);
             view.SetBusy(true, false);
@@ -360,15 +418,14 @@ namespace Aperture.Excel
                 }
                 else if (args.Type == "agent_settled")
                 {
-                    SetBusy(false);
                     if ((bool?)json["aborted"] == true || runStopped)
-                    { EndActivity("stopped"); SetStatus("Ответ остановлен"); }
+                    { EndRun("stopped"); SetStatus("Ответ остановлен"); }
                     else if (!String.IsNullOrWhiteSpace(runError))
-                    { EndActivity("error"); SetStatus("Запрос завершился ошибкой", true); }
-                    else { activityOwned = false; SetStatus("Готово"); }
+                    { EndRun("error"); SetStatus("Запрос завершился ошибкой", true); }
+                    else { activityOwned = false; EndRun("done"); SetStatus("Готово"); } // the view ends its card on agent_settled
                 }
                 else if (args.Type == "process_exit" || args.Type == "error")
-                { runError = "Агент остановлен или вернул ошибку"; EndActivity("error"); SetBusy(false); SetStatus(runError, true); }
+                { runError = "Агент остановлен или вернул ошибку"; EndRun("error"); SetStatus(runError, true); }
             });
         }
 
@@ -393,6 +450,17 @@ namespace Aperture.Excel
             if (status == "stopped") runStopped = true;
             view.ApplyActivity(new JObject { ["type"] = "aperture_run_end", ["status"] = status });
             activityOwned = false;
+        }
+
+        // Every end of a submitted request: done, stopped or error.
+        private void EndRun(string status)
+        {
+            EndActivity(status);
+            SetBusy(false);
+            if (scriptedRun == null) return;
+            scriptedRun.End(status, runError);
+            scriptedRun = null;
+            view.SetScripted(false);
         }
 
         private void ShowSettings()
@@ -446,6 +514,7 @@ namespace Aperture.Excel
                 dispatchLifetime.Cancel();
                 startupCancellation?.Cancel();
                 releaseTurn();
+                if (scriptedRun != null) { scriptedRun.End("error", "Панель Aperture2 закрыта до конца запроса"); scriptedRun = null; }
                 view.Command -= ViewCommand;
                 if (session != null)
                 {

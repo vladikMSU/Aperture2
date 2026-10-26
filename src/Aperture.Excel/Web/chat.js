@@ -8,6 +8,8 @@
   let busy = false;
   let canStop = true;
   let awaitingClear = false;
+  let scripted = false; // a request sent through the add-in's automation owns the composer
+  const placeholder = prompt.placeholder;
   let currentRun = null;
   let runSequence = 0;
   let renderTimer = 0;
@@ -256,7 +258,8 @@
     prompt.style.height = Math.min(prompt.scrollHeight, 180) + 'px';
   }
   function applyBusy() {
-    prompt.readOnly = busy && awaitingClear;
+    prompt.readOnly = (busy && awaitingClear) || scripted;
+    prompt.placeholder = scripted ? 'Запрос отправлен скриптом · ввод откроется после ответа' : placeholder;
     const send = $('send'), stop = $('stop');
     send.hidden = busy; stop.hidden = !busy;
     send.disabled = busy || !prompt.value.trim();
@@ -819,6 +822,7 @@
           busy = !!message.busy; canStop = message.canStop !== false;
           if (!busy) awaitingClear = false;
           applyBusy(); break;
+        case 'scripted': scripted = !!message.active; applyBusy(); break;
         case 'message': appendMessage(message.who || 'Aperture', message.text || ''); break;
         case 'activity': activity(message.event); break;
         case 'clear_transcript':

@@ -190,6 +190,7 @@ namespace Aperture.Excel
         internal void SetBinding(string name) { Enqueue(new JObject { ["type"] = "binding", ["name"] = name }); }
         internal void SetStatus(string text, bool error) { Enqueue(new JObject { ["type"] = "status", ["text"] = text, ["error"] = error }); }
         internal void SetBusy(bool busy, bool canStop = true) { Enqueue(new JObject { ["type"] = "busy", ["busy"] = busy, ["canStop"] = canStop }); }
+        internal void SetScripted(bool active) { Enqueue(new JObject { ["type"] = "scripted", ["active"] = active }); }
         internal void AppendMessage(string who, string text) { Enqueue(new JObject { ["type"] = "message", ["who"] = who, ["text"] = text }); }
         internal void ApplyActivity(JObject rawPiEvent)
         {

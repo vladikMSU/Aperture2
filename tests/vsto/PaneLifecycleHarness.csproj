@@ -10,6 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\src\Aperture.Excel\ChatPaneControl.cs" Link="ChatPaneControl.cs" />
+    <Compile Include="..\..\src\Aperture.Excel\ScriptedRun.cs" Link="ScriptedRun.cs" />
     <Compile Include="FakeDependencies.cs" />
     <Compile Include="PaneLifecycleHarness.cs" />
   </ItemGroup>

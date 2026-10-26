@@ -30,12 +30,14 @@ namespace Aperture.Runtime
     {
         public static TaskCompletionSource<PiSession> StartGate;
         public static int Starts, Prompts, LastPromptThreadId;
+        public static object LastOptions;
         public TaskCompletionSource<bool> StopGate;
         public TaskCompletionSource<bool> PromptGate;
         public TaskCompletionSource<bool> AbortGate;
         public bool Disposed;
         public string PromptDisposition = "started";
         public bool StateStreaming;
+        public string SessionFile = "history.jsonl";
         public bool IsRunning { get { return !Disposed; } }
 
         public event EventHandler<PiEvent> EventReceived;
@@ -58,6 +60,7 @@ namespace Aperture.Runtime
         public static Task<PiSession> StartAsync(object options, ExcelTarget target, CancellationToken cancellation)
         {
             Starts++;
+            LastOptions = options;
             // Intentionally return a late process even after cancellation, exercising
             // the pane's defensive ownership cleanup rather than the runtime's checks.
             return StartGate.Task;
@@ -95,7 +98,7 @@ namespace Aperture.Excel
     {
         private readonly int ownerThread = Thread.CurrentThread.ManagedThreadId;
         internal string BindingText, StatusText;
-        internal bool Busy, CanStop, PromptCleared, StatusIsError;
+        internal bool Busy, CanStop, PromptCleared, StatusIsError, Scripted;
         internal readonly List<string> Transcript = new List<string>();
         internal readonly List<JObject> Activity = new List<JObject>();
         internal event EventHandler<ChatPaneCommandEventArgs> Command;
@@ -112,6 +115,7 @@ namespace Aperture.Excel
         internal void SetBinding(string text) { VerifyThread(); BindingText = text; }
         internal void SetStatus(string text, bool error) { VerifyThread(); StatusText = text; StatusIsError = error; }
         internal void SetBusy(bool busy, bool canStop = true) { VerifyThread(); Busy = busy; CanStop = canStop; }
+        internal void SetScripted(bool active) { VerifyThread(); Scripted = active; }
         internal void AppendMessage(string who, string text) { VerifyThread(); Transcript.Add(who + ": " + text); }
         internal void ApplyActivity(JObject rawPiEvent) { VerifyThread(); Activity.Add((JObject)rawPiEvent.DeepClone()); }
         internal void ClearTranscript() { VerifyThread(); Transcript.Clear(); Activity.Clear(); }
@@ -138,8 +142,10 @@ namespace Aperture.Excel
 
     internal sealed class PaneSettings
     {
+        internal string Provider, Model;
         internal static PaneSettings Load() { return new PaneSettings(); }
-        internal object ToOptions() { return null; }
+        internal PaneSettings WithModel(string provider, string model) { return new PaneSettings { Provider = provider, Model = model }; }
+        internal object ToOptions() { return this; }
     }
 
     internal sealed class SettingsDialog : Form

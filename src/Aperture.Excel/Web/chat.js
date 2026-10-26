@@ -9,7 +9,6 @@
   let canStop = true;
   let awaitingClear = false;
   let scripted = false; // a request sent through the add-in's automation owns the composer
-  const placeholder = prompt.placeholder;
   let currentRun = null;
   let runSequence = 0;
   let renderTimer = 0;
@@ -253,19 +252,21 @@
   }
 
   // ---------------------------------------------------------------- composer
+  const PROMPT_MAX_HEIGHT = 180;
   function autosize() {
     prompt.style.height = 'auto';
-    prompt.style.height = Math.min(prompt.scrollHeight, 180) + 'px';
+    prompt.style.height = Math.min(prompt.scrollHeight, PROMPT_MAX_HEIGHT) + 'px';
+    // A scrollbar (with its arrows in WebView2) only for text taller than the field can grow.
+    prompt.style.overflowY = prompt.scrollHeight > PROMPT_MAX_HEIGHT ? 'auto' : 'hidden';
   }
   function applyBusy() {
+    // A scripted request keeps the draft and the usual placeholder; the field is just locked.
     prompt.readOnly = (busy && awaitingClear) || scripted;
-    prompt.placeholder = scripted ? 'Запрос отправлен скриптом · ввод откроется после ответа' : placeholder;
     const send = $('send'), stop = $('stop');
     send.hidden = busy; stop.hidden = !busy;
     send.disabled = busy || !prompt.value.trim();
     stop.disabled = !canStop;
-    $('status').classList.toggle('working', busy);
-    ['new-chat', 'rebind', 'settings'].forEach(id => { $(id).disabled = busy; });
+    ['new-chat', 'settings'].forEach(id => { $(id).disabled = busy; });
     document.querySelectorAll('[data-prompt]').forEach(button => { button.disabled = busy; });
   }
   function submit() {
@@ -277,9 +278,9 @@
   $('send').addEventListener('click', submit);
   $('stop').addEventListener('click', () => post('stop'));
   $('new-chat').addEventListener('click', () => post('new_chat'));
-  $('rebind').addEventListener('click', () => post('rebind'));
   $('settings').addEventListener('click', () => post('settings'));
   prompt.addEventListener('input', () => { autosize(); applyBusy(); });
+  window.addEventListener('resize', autosize); // a narrower pane rewraps the draft
   prompt.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); submit(); }
   });
@@ -297,15 +298,6 @@
       currentRun = null;
       node = element('div', 'message user');
       node.appendChild(element('div', 'bubble', text));
-    } else if (/^Ошибка/.test(who)) {
-      node = element('div', 'message error');
-      node.appendChild(icon('alert', 'message-icon'));
-      const copy = element('div', 'message-copy');
-      if (who !== 'Ошибка') copy.appendChild(element('strong', '', who + '. '));
-      copy.appendChild(document.createTextNode(text));
-      node.appendChild(copy);
-    } else if (who === 'Система') {
-      node = element('div', 'message system', text);
     } else {
       node = element('div', 'message assistant markdown');
       renderMarkdown(node, text);
@@ -350,7 +342,7 @@
     const run = {
       node, header, title, meta, body, footer, tools: new Map(), models: [], model: null, lastGroup: null,
       startedAt: Date.now(), finishedAt: 0, finished: false, status: 'running', current: 'Начинаю работу',
-      modelNames: [], outputTokens: 0, streamMs: 0, pendingSequence: 0
+      modelNames: [], outputTokens: 0, streamMs: 0, pendingSequence: 0, notices: new Set()
     };
     header.addEventListener('click', () => {
       const collapsed = !node.classList.contains('collapsed');
@@ -707,11 +699,51 @@
     place(run, node, start ? 'notice' : 'error');
     setCurrent(run, start ? 'Повтор запроса к провайдеру' : 'Повтор не удался');
   }
+  // Host facts the user has to see (errors, unconfirmed stop, unknown outcome, notes): inside the card
+  // of the request in progress, otherwise as their own line. An immediate repeat is not added again.
+  function noticeCopy(title, detail) {
+    const copy = element('span', 'notice-copy');
+    copy.appendChild(element('span', 'notice-title', title));
+    if (detail) copy.appendChild(element('span', 'notice-detail', detail));
+    return copy;
+  }
+  function notice({ level, title, detail, inRun }) {
+    if (!title) return;
+    const kind = ['error', 'warning'].includes(level) ? level : 'info';
+    const key = kind + '\n' + title + '\n' + (detail || '');
+    if (inRun) {
+      const run = ensureRun();
+      if (run.notices.has(key)) return;
+      run.notices.add(key);
+      const node = element('div', kind === 'error' ? 'step error host-notice' : 'step notice host-notice ' + kind);
+      node.append(icon(kind === 'error' ? 'alert' : kind === 'warning' ? 'alert' : 'dash', 'step-icon'), noticeCopy(title, detail));
+      place(run, node, kind === 'error' ? 'error' : 'notice');
+      return;
+    }
+    hideWelcome();
+    const last = messages.lastElementChild;
+    if (last && last.dataset.notice === key) {
+      // The same fact again: mark the existing line instead of stacking copies.
+      last.classList.remove('again'); void last.offsetWidth; last.classList.add('again');
+      return;
+    }
+    const node = element('div', 'message notice ' + kind);
+    node.dataset.notice = key;
+    if (kind !== 'info') node.appendChild(icon('alert', 'message-icon'));
+    node.appendChild(noticeCopy(title, detail));
+    messages.appendChild(node);
+  }
   function finishRun(status) {
     const run = currentRun;
     if (!run) return;
     run.finished = true; run.status = status;
     if (!run.finishedAt) run.finishedAt = Date.now();
+    if (status === 'stopped' && !run.body.querySelector('.notice.stopped')) {
+      // A Stop during a tool call has no aborted model message; the card still says how it ended.
+      const node = element('div', 'step notice stopped');
+      node.append(icon('stop', 'step-icon'), element('span', 'step-label', 'Ответ остановлен'));
+      place(run, node, 'notice');
+    }
     run.tools.forEach(tool => {
       if (['generating', 'queued'].includes(tool.state)) setToolState(tool, 'not_run');
       else if (tool.state === 'running') {
@@ -802,7 +834,8 @@
       case 'auto_retry_end': if (event.success === false) retryNotice(event, false); break;
       // agent_end may precede an automatic retry. Only agent_settled is terminal.
       case 'agent_settled': finishRun(event.aborted ? 'stopped' : 'done'); break;
-      case 'aperture_run_end': finishRun(event.status === 'error' ? 'error' : event.status === 'stopped' ? 'stopped' : 'done'); break;
+      // The host ends only a request the user submitted: a Stop before Pi's first event still gets its card.
+      case 'aperture_run_end': ensureRun(); finishRun(event.status === 'error' ? 'error' : event.status === 'stopped' ? 'stopped' : 'done'); break;
       case 'process_exit': case 'error': if (currentRun && !currentRun.finished) finishRun('error'); break;
     }
   }
@@ -811,13 +844,7 @@
     if (!message || typeof message.type !== 'string') return;
     withScroll(() => {
       switch (message.type) {
-        case 'binding':
-          $('workbook-name').textContent = message.name || 'Книга не привязана';
-          $('workbook-name').title = message.name || 'Книга не привязана'; break;
-        case 'status':
-          $('status-text').textContent = message.text || '';
-          $('status-text').title = message.text || '';
-          $('status').classList.toggle('error', !!message.error); break;
+        case 'notice': notice(message); break;
         case 'busy':
           busy = !!message.busy; canStop = message.canStop !== false;
           if (!busy) awaitingClear = false;

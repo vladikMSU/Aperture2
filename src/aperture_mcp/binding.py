@@ -253,7 +253,9 @@ class BoundSession(ExcelSession):
             except Exception as exc:
                 raise ToolError("Workbook binding expired. Start a new chat; no replacement was selected.") from exc
             if len(matches) != 1:
-                raise ToolError("Captured workbook is not uniquely open in this Excel instance. Start a new chat binding.")
+                raise ToolError("Captured workbook is not uniquely open under its captured name, path and window: "
+                                "it was closed or renamed (for example by Save As). No other workbook was selected. "
+                                "Tell the user; after a rename the sidebar rebinds the same book on their next message.")
             self._workbook = matches[0]
         return self._workbook
 

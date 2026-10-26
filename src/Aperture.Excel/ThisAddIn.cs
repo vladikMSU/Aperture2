@@ -22,30 +22,32 @@ namespace Aperture.Excel
         private int scriptedWindow;
         private System.Windows.Forms.Timer paneCleanupTimer;
 
+        // No pane opens by itself: the ribbon button (TogglePane) or the automation's Start creates
+        // the pane of a window on first use, one pane per window.
         private void ThisAddIn_Startup(object sender, EventArgs args)
         {
-            Application.WindowActivate += WindowActivated;
             loaded = true;
             paneCleanupTimer = new System.Windows.Forms.Timer { Interval = 1500 };
             paneCleanupTimer.Tick += PruneClosedPanes;
             paneCleanupTimer.Start();
             Diagnostics.Write("addin_loaded", "version=0.1.0");
-            try { EnsureActivePane(); }
-            catch (Exception ex) { Diagnostics.Write("initial_pane_deferred", ex.GetType().Name); }
         }
 
-        private void WindowActivated(ExcelInterop.Workbook workbook, ExcelInterop.Window window)
-        {
-            try { EnsurePane(window); }
-            catch (Exception ex) { Diagnostics.Write("pane_create_failed", ex.GetType().Name); }
-        }
-
+        // Home > Aperture2: shows the pane of the active window, creating it on first use, or hides it.
         internal void TogglePane()
         {
             try
             {
-                var entry = EnsureActivePane();
-                if (entry != null) entry.Pane.Visible = !entry.Pane.Visible;
+                var window = Application.ActiveWindow;
+                if (window == null)
+                {
+                    System.Windows.Forms.MessageBox.Show("Откройте книгу: чат Aperture2 работает в окне книги.", "Aperture2",
+                        System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Information);
+                    return;
+                }
+                PaneEntry entry;
+                if (TryGetPane(window.Hwnd, out entry)) entry.Pane.Visible = !entry.Pane.Visible;
+                else EnsurePane(window);
             }
             catch (Exception ex)
             {
@@ -53,21 +55,24 @@ namespace Aperture.Excel
             }
         }
 
-        private PaneEntry EnsureActivePane()
+        // The live pane of this window; a pane of a closed or replaced window is removed.
+        private bool TryGetPane(int hwnd, out PaneEntry entry)
         {
-            var window = Application.ActiveWindow;
-            return window == null ? null : EnsurePane(window);
+            if (panes.TryGetValue(hwnd, out entry))
+            {
+                if (!entry.Control.IsDisposed && entry.Lifetime.IsCurrent) return true;
+                RemovePane(hwnd, entry);
+            }
+            entry = null;
+            return false;
         }
 
+        // The pane of this window, created and shown when it has none.
         private PaneEntry EnsurePane(ExcelInterop.Window window)
         {
             var hwnd = window.Hwnd;
             PaneEntry entry;
-            if (panes.TryGetValue(hwnd, out entry))
-            {
-                if (!entry.Control.IsDisposed && entry.Lifetime.IsCurrent) return entry;
-                RemovePane(hwnd, entry);
-            }
+            if (TryGetPane(hwnd, out entry)) return entry;
             var lifetime = new WindowLifetime(hwnd, instanceId);
             var control = new ChatPaneControl(() => CaptureActiveWorkbook(window, lifetime),
                 () => AcquireTurn(hwnd), () => ReleaseTurn(hwnd));
@@ -142,7 +147,7 @@ namespace Aperture.Excel
                     if (windows[windowIndex].Hwnd == paneWindow.Hwnd)
                         return new WorkbookBinding(Application, book, paneWindow, instanceId, lifetime);
             }
-            throw new InvalidOperationException("Окно больше не связано с открытой книгой. Откройте панель в нужной книге.");
+            throw new InvalidOperationException("Окно больше не связано с открытой книгой. Откройте Aperture2 в окне нужной книги.");
         }
 
         protected override Office.IRibbonExtensibility CreateRibbonExtensibilityObject()
@@ -156,6 +161,8 @@ namespace Aperture.Excel
         }
 
         // Automation calls arrive on Excel's UI thread (AgentAutomation is a StandardOleMarshalObject).
+        // The book's pane is created on its first Start, like on its first button press, and shown;
+        // the chat sends the prompt once the pane has its window and Start returns at once.
         internal void StartScripted(string workbookName, string prompt, string provider, string model)
         {
             if (String.IsNullOrWhiteSpace(prompt)) throw new ArgumentException("Пустой промпт.");
@@ -239,7 +246,6 @@ namespace Aperture.Excel
                 paneCleanupTimer.Dispose();
                 paneCleanupTimer = null;
             }
-            Application.WindowActivate -= WindowActivated;
             foreach (var entry in panes.Values) { entry.Control.Dispose(); entry.Lifetime.Dispose(); }
             panes.Clear();
             Diagnostics.Write("addin_shutdown");

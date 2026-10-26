@@ -12,12 +12,11 @@
 <body>
   <main class="app">
     <header class="header">
-      <div class="workbook" title="Книга закреплена за этим чатом. Переключение окна её не меняет.">
-        <svg class="workbook-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/><path d="M2.5 6.5h11M6.5 6.5v7M2.5 10h11"/></svg>
-        <span id="workbook-name">Книга не привязана</span>
+      <div class="brand">
+        <svg class="brand-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 5.6 13.45 8.75M10.08 6.8v6.29M10.08 9.2 4.63 12.35M8 10.4 2.55 7.25M5.92 9.2V2.91M5.92 6.8l5.45-3.15"/></svg>
+        <span>Aperture</span>
       </div>
       <nav class="toolbar" aria-label="Действия чата">
-        <button id="rebind" class="icon-button" title="Привязать текущую книгу к новому чату" aria-label="Сменить книгу"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5h10M10 3l2.5 2.5L10 8M13.5 10.5h-10M6 8l-2.5 2.5L6 13"/></svg></button>
         <button id="new-chat" class="icon-button" title="Новый чат" aria-label="Новый чат"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
         <button id="settings" class="icon-button" title="Настройки" aria-label="Настройки"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.1"/><path d="M6.9 1.8h2.2l.4 1.7 1.1.6 1.7-.5 1.1 1.9-1.3 1.2v1.3l1.3 1.2-1.1 1.9-1.7-.5-1.1.6-.4 1.7H6.9l-.4-1.7-1.1-.6-1.7.5-1.1-1.9 1.3-1.2V7.4L2.6 6.2l1.1-1.9 1.7.5 1.1-.6z"/></svg></button>
       </nav>
@@ -25,7 +24,7 @@
     <section id="conversation" class="conversation" role="log" aria-label="Переписка" aria-live="polite" aria-relevant="additions">
       <div id="welcome" class="welcome">
         <h1>Разберёмся в модели</h1>
-        <p>Задайте вопрос о привязанной книге. Обычные правки — по вашей просьбе, аудит сам по себе ничего не меняет.</p>
+        <p>Задайте вопрос об этой книге. Обычные правки — по вашей просьбе, аудит сам по себе ничего не меняет.</p>
         <div class="suggestions">
           <button data-prompt="Опиши структуру этой финансовой модели и связи между листами."><span>Разобраться в структуре</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg></button>
           <button data-prompt="Проверь формулы и найди возможные ошибки. Не изменяй исходные расчёты."><span>Проверить формулы</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg></button>
@@ -38,7 +37,6 @@
       <div class="composer">
         <textarea id="prompt" rows="1" maxlength="100000" aria-label="Сообщение" placeholder="Спросите о модели…" spellcheck="false"></textarea>
         <div class="composer-bar">
-          <div id="status" class="status" role="status"><span class="status-dot" aria-hidden="true"></span><span id="status-text">Готова к работе</span></div>
           <button id="stop" class="stop-button" title="Остановить" aria-label="Остановить" hidden><span aria-hidden="true"></span></button>
           <button id="send" class="send-button" title="Отправить · Enter" aria-label="Отправить сообщение"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3.5M3.8 7.5 8 3.3l4.2 4.2"/></svg></button>
         </div>

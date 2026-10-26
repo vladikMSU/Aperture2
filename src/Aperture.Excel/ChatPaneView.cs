@@ -179,7 +179,7 @@ namespace Aperture.Excel
                 FlushPending();
                 return;
             }
-            if (command != "send" && command != "stop" && command != "rebind" && command != "new_chat" && command != "settings") return;
+            if (command != "send" && command != "stop" && command != "new_chat" && command != "settings") return;
             var text = (string)message["text"] ?? String.Empty;
             if (text.Length > 100000) return;
             // Settings can open a modal dialog. Defer beyond the WebView event to avoid
@@ -187,8 +187,12 @@ namespace Aperture.Excel
             PostUi(() => Command?.Invoke(this, new ChatPaneCommandEventArgs(command, text)));
         }
 
-        internal void SetBinding(string name) { Enqueue(new JObject { ["type"] = "binding", ["name"] = name }); }
-        internal void SetStatus(string text, bool error) { Enqueue(new JObject { ["type"] = "status", ["text"] = text, ["error"] = error }); }
+        /// <summary>An error, warning or note for the timeline: inside the card of the request in progress
+        /// (<paramref name="inRun"/>), otherwise as its own line. The view drops an immediate repeat.</summary>
+        internal void AppendNotice(string level, string title, string detail, bool inRun)
+        {
+            Enqueue(new JObject { ["type"] = "notice", ["level"] = level, ["title"] = title, ["detail"] = detail, ["inRun"] = inRun });
+        }
         internal void SetBusy(bool busy, bool canStop = true) { Enqueue(new JObject { ["type"] = "busy", ["busy"] = busy, ["canStop"] = canStop }); }
         internal void SetScripted(bool active) { Enqueue(new JObject { ["type"] = "scripted", ["active"] = active }); }
         internal void AppendMessage(string who, string text) { Enqueue(new JObject { ["type"] = "message", ["who"] = who, ["text"] = text }); }

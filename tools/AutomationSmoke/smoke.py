@@ -4,9 +4,11 @@ Two visible Excel processes open a small book saved under .local/smoke, as a scr
 started with DispatchEx (default, like the benchmark runner) or, with --launch normal, as
 "excel /x <book>". On this machine Excel started through COM loaded the add-in build of the main
 checkout regardless of the registered manifest, while "excel /x" loads the registered one, so a
-worktree build is checked with --launch normal. Excel B only keeps its pane open
-to check that two panes share the WebView2 profile. Excel A runs a real model request through
-Start, then a second request stopped with Cancel. The provider is paid: prompts stay short.
+worktree build is checked with --launch normal. No pane opens by itself: Excel B opens its pane
+with Start and an immediate Cancel, which stops the startup of Pi before the prompt is sent, and
+keeps it open to check that two panes share the WebView2 profile. Excel A runs a real model request
+through Start on a window whose pane was never opened, then a second request stopped with Cancel.
+The provider is paid: prompts stay short.
 Books are closed without saving, both Excels quit, and the smoke checks that no Pi/MCP process
 of these Excels remains. Other Excel processes are never touched. Report: .local/smoke/automation-*.
 """
@@ -216,6 +218,21 @@ class OwnedExcel:
                 return info
             pump(0.3)
 
+    def open_pane_without_request(self, provider: str, model: str) -> dict:
+        """Start creates and shows the pane; Cancel right away stops the startup of Pi before the
+        prompt is sent. Pi writes its history only with the first message, so none may exist."""
+        self.automation.Start(str(self.book.Name), "Ответь одним словом: готово.", provider, model)
+        self.automation.Cancel()
+        deadline = time.monotonic() + 30
+        state = self.state()
+        while state["state"] == "running" and time.monotonic() < deadline:
+            pump(0.2)
+            state = self.state()
+        history = state.get("log_path")
+        result = {"state": state, "historyWritten": bool(history and Path(history).exists())}
+        assert state["state"] == "cancelled" and not result["historyWritten"], result
+        return result
+
     def quit(self) -> dict:
         result = {"processId": self.pid, "quitRequested": False}
         try:
@@ -313,6 +330,10 @@ def main() -> int:
         other = OwnedExcel(other_path, "other", before, args.launch)
         roots.add(other.pid)
         other.connect()
+        pump(2)
+        checks["otherPanesBeforeRequest"] = other.info()["paneCount"]
+        assert checks["otherPanesBeforeRequest"] == 0, "A pane opened by itself in Excel B"
+        checks["otherPaneOpened"] = other.open_pane_without_request(args.provider, args.model)
         other_info = other.wait_pane()
         panes = report["panes"] = {"foreignBrowsers": foreign_pane_browsers(roots), "other": other_info["panes"]}
         checks["otherConnectRequired"] = other.connect_required
@@ -320,11 +341,14 @@ def main() -> int:
         excel = OwnedExcel(smoke_path, "smoke", before | {other.pid}, args.launch)
         roots.add(excel.pid)
         excel.connect()
+        pump(2)
         info = excel.info()
         checks["getInfo"] = {k: v for k, v in info.items() if k != "panes"}
         checks["connectRequired"] = excel.connect_required
         assert info["name"] == "Aperture2" and info["loaded"] and info["excelProcessId"] == excel.pid, info
         assert info["systemPromptSha256"] and info["commit"], info
+        # Run 1 starts on a window whose pane was never opened: Start creates it.
+        assert info["paneCount"] == 0, "A pane opened by itself before Start"
         idle = excel.state()
         checks["stateBeforeStart"] = idle
         assert idle == {"state": "idle", "log_path": None, "error": None}, idle
@@ -340,6 +364,8 @@ def main() -> int:
         run["refusedWhileBusy"] = expect_refusal(
             lambda: excel.automation.Start(book_name, "второй запрос", args.provider, args.model), "занят")
         run["stateAfterStart"] = excel.state()["state"]
+        run["paneCreatedByStart"] = [{k: p[k] for k in ("windowHwnd", "paneId", "boundWorkbookId")} for p in excel.info()["panes"]]
+        assert len(run["paneCreatedByStart"]) == 1, run["paneCreatedByStart"]
         final = poll(excel, 300, lambda s: s["state"] != "running", run)
         run["final"] = final
         run["seconds"] = round(time.monotonic() - started, 1)

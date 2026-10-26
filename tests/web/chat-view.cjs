@@ -9,7 +9,8 @@ const { pathToFileURL } = require('url');
 const root = path.resolve(__dirname, '../..');
 const output = path.join(root, 'work');
 const screenshots = ['chat-webview-welcome.png', 'chat-webview-conversation.png', 'chat-webview-streaming.png',
-  'chat-webview-collapsed.png', 'chat-webview-narrow.png', 'chat-webview-light.png', 'chat-webview-all-tools.png'];
+  'chat-webview-collapsed.png', 'chat-webview-narrow.png', 'chat-webview-light.png', 'chat-webview-all-tools.png',
+  'chat-webview-composer-idle.png', 'chat-webview-composer-busy.png', 'chat-webview-composer-error.png'];
 let checks = 0;
 function check(actual, expected, message) {
   assert.deepStrictEqual(actual, expected, message);
@@ -45,13 +46,27 @@ function check(actual, expected, message) {
     const modelMessage = (content = [], stopReason = 'stop') => ({ role: 'assistant', content, stopReason, provider: 'fixture-provider', model: 'fixture-model', usage: { input: 900, output: 120, totalTokens: 1020 } });
     const run = () => page.locator('.run').last();
     const tool = id => page.locator(`[data-tool-call-id="${id}"]`);
+    const notice = (level, title, detail, inRun = false) => receive({ type: 'notice', level, title, detail, inRun });
+    // A short pane: the composer and the end of the timeline above it in one picture.
+    const bottom = async name => {
+      await page.setViewportSize({ width: 410, height: 460 });
+      await page.locator('#conversation').evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await page.screenshot({ path: path.join(output, name) });
+      await page.setViewportSize({ width: 410, height: 850 });
+    };
+    const promptScroll = () => page.locator('#prompt').evaluate(node => ({ overflowY: getComputedStyle(node).overflowY, scrolls: node.scrollHeight > node.clientHeight }));
 
-    // ---------------------------------------------------------------- composer and commands
-    await receive({ type: 'binding', name: 'Финансовая модель · 2026.xlsx' });
-    await receive({ type: 'status', text: 'Книга привязана · готова к работе', error: false });
+    // ---------------------------------------------------------------- header, composer and commands
     check(await page.locator('#ready-marker').count(), 0, 'Fixture sanity: no unexpected markup.');
     check(await page.evaluate(() => window.apertureSent[0].command), 'ready', 'The page must announce readiness to the host.');
+    check(await page.locator('#workbook-name, #rebind').count(), 0, 'The header must not name the workbook or offer rebinding.');
+    check(await page.locator('.toolbar button').evaluateAll(nodes => nodes.map(node => node.id)), ['new-chat', 'settings'], 'The header keeps only New chat and Settings.');
+    check((await page.locator('.header .brand').textContent()).trim(), 'Aperture', 'The header shows the product mark on the left.');
+    check(await page.locator('#status, #status-text, .status-dot').count(), 0, 'The composer has no status line.');
+    check(await page.locator('.composer-bar').evaluate(node => Array.from(node.children).map(child => child.id)), ['stop', 'send'], 'The composer bar holds only Stop/Send.');
+    check(await promptScroll(), { overflowY: 'hidden', scrolls: false }, 'An empty one-line prompt must have no scrollbar arrows.');
     await page.screenshot({ path: path.join(output, screenshots[0]) });
+    await bottom(screenshots[7]);
     check(await page.locator('#send').isDisabled(), true, 'Empty prompt must disable Send.');
     await page.locator('[data-prompt]').first().click();
     await page.locator('#prompt').press('Shift+Enter');
@@ -77,19 +92,65 @@ function check(actual, expected, message) {
     check(await page.locator('#send').isDisabled(), false, 'The draft becomes sendable once the run is idle.');
     await page.locator('#settings').click();
     check((await lastSent()).command, 'settings', 'Settings must reach the bridge after the run.');
-    await page.locator('#rebind').click();
-    check((await lastSent()).command, 'rebind', 'Rebind must reach the bridge.');
     await page.locator('#new-chat').click();
     check((await lastSent()).command, 'new_chat', 'New chat must reach the bridge.');
     // A request started through the add-in's automation: the draft stays, but cannot be edited or sent.
+    const placeholder = await page.locator('#prompt').getAttribute('placeholder');
     await receive({ type: 'scripted', active: true });
     await receive({ type: 'busy', busy: true, canStop: true });
     check(await page.locator('#prompt').evaluate(node => node.readOnly), true, 'A scripted request must lock the composer.');
     check(await page.locator('#prompt').inputValue(), 'Черновик следующего вопроса', 'A scripted request must keep the draft.');
     check(await page.locator('#stop').isDisabled(), false, 'Stop must stay available during a scripted request.');
+    // The read-only field cannot be typed into; set the value the way an empty composer would have it.
+    const setPrompt = value => page.locator('#prompt').evaluate((node, value) => { node.value = value; node.dispatchEvent(new Event('input')); }, value);
+    await setPrompt('');
+    check(await page.locator('#prompt').getAttribute('placeholder'), placeholder, 'A scripted request keeps the usual placeholder.');
+    check(await promptScroll(), { overflowY: 'hidden', scrolls: false }, 'The locked empty prompt must not wrap or show scrollbar arrows.');
+    await page.setViewportSize({ width: 320, height: 850 });
+    check(await promptScroll(), { overflowY: 'hidden', scrolls: false }, 'The locked empty prompt must not wrap at 320 px either.');
+    await page.setViewportSize({ width: 410, height: 850 });
+    await setPrompt('Черновик следующего вопроса');
     await receive({ type: 'busy', busy: false, canStop: true });
     await receive({ type: 'scripted', active: false });
     check(await page.locator('#prompt').evaluate(node => node.readOnly), false, 'The composer must unlock after the scripted request.');
+    await page.locator('#prompt').fill(Array.from({ length: 14 }, (_, index) => 'Строка черновика ' + index).join('\n'));
+    await page.locator('#prompt').dispatchEvent('input');
+    check(await promptScroll(), { overflowY: 'auto', scrolls: true }, 'Only text taller than the grown field may scroll.');
+    await page.locator('#prompt').fill('');
+    await page.locator('#prompt').dispatchEvent('input');
+    check(await promptScroll(), { overflowY: 'hidden', scrolls: false }, 'Clearing the prompt must remove the scrollbar again.');
+
+    // ---------------------------------------------------------------- host notices replace the status line
+    await receive({ type: 'clear_transcript' });
+    await notice('info', 'Настройки сохранены · начните новый чат');
+    check(await page.locator('#messages > .message.notice.info').textContent(), 'Настройки сохранены · начните новый чат', 'A note outside a request is its own quiet line.');
+    check(await page.locator('#welcome').isVisible(), false, 'A notice replaces the welcome state.');
+    await notice('error', 'Не удалось выполнить запрос', 'В другом окне Excel уже выполняется запрос Aperture2.');
+    await notice('error', 'Не удалось выполнить запрос', 'В другом окне Excel уже выполняется запрос Aperture2.');
+    check(await page.locator('#messages > .message.notice.error').count(), 1, 'An immediately repeated error must not stack a second line.');
+    check(await page.locator('#messages > .message.notice.error').evaluate(node => node.classList.contains('again')), true, 'A repeated error marks the existing line.');
+    check(await page.locator('#messages > .message.notice.error .notice-title').textContent(), 'Не удалось выполнить запрос', 'An error line names what failed.');
+    check(await page.locator('#messages > .message.notice.error .notice-detail').textContent(), 'В другом окне Excel уже выполняется запрос Aperture2.', 'An error line keeps the reason.');
+    await receive({ type: 'message', who: 'Вы', text: 'Прочитай лист Расчёт.' });
+    await receive({ type: 'busy', busy: true, canStop: true });
+    await notice('warning', 'Статус запроса неизвестен · остановите агента перед повтором', 'Pi RPC response timed out.', true);
+    await notice('warning', 'Статус запроса неизвестен · остановите агента перед повтором', 'Pi RPC response timed out.', true);
+    check(await run().locator('.step.notice.warning.host-notice').count(), 1, 'A warning during a request belongs to its card, once.');
+    check(await run().getAttribute('data-state'), 'running', 'A host warning must not end the request.');
+    check(await page.locator('#send').isHidden() && await page.locator('#stop').isVisible(), true, 'A running request shows Stop instead of Send.');
+    await bottom(screenshots[8]);
+    await notice('error', 'Не удалось выполнить запрос', 'Pi RPC failed to start. Pi is not built.', true);
+    await activity({ type: 'aperture_run_end', status: 'error' });
+    await receive({ type: 'busy', busy: false, canStop: true });
+    check(await run().locator('.step.error.host-notice .notice-title').textContent(), 'Не удалось выполнить запрос', 'An error during a request is shown in its card.');
+    check(await run().getAttribute('data-state'), 'error', 'The card ends with the error.');
+    await notice('error', 'Агент остановлен или вернул ошибку', 'Pi exited.');
+    check(await page.locator('#messages > .message.notice.error').count(), 2, 'An error after the request is its own line.');
+    await bottom(screenshots[9]);
+    await receive({ type: 'message', who: 'Вы', text: 'Остановлю сразу.' });
+    await activity({ type: 'aperture_run_end', status: 'stopped' });
+    check(await run().getAttribute('data-state'), 'stopped', 'A Stop before the first Pi event still gets its card.');
+    check(await run().locator('.step.notice.stopped').textContent(), 'Ответ остановлен', 'That card says the answer was stopped.');
 
     // ---------------------------------------------------------------- one request: chronological timeline
     await receive({ type: 'clear_transcript' });
@@ -231,6 +292,7 @@ function check(actual, expected, message) {
     await activity({ type: 'aperture_run_end', status: 'stopped' });
     check(await run().getAttribute('data-state'), 'stopped', 'Confirmed abort must mark the run stopped.');
     check(await tool('cancel-me').getAttribute('data-state'), 'unknown', 'Abort must preserve the unknown outcome of an in-flight tool.');
+    check(await run().locator('.step.notice.stopped').textContent(), 'Ответ остановлен', 'A Stop during a tool call still ends the card with "Ответ остановлен".');
     await receive({ type: 'message', who: 'Вы', text: 'Синтетическая ошибка провайдера.' });
     await activity({ type: 'agent_start' });
     await activity({ type: 'turn_start' });
@@ -267,8 +329,8 @@ function check(actual, expected, message) {
     check((await run().textContent()).includes('Request was aborted'), false, 'The raw abort message must not be shown.');
     check(await run().locator('.run-facts').textContent(), 'openrouter/free → 2 модели · 240 ток.', 'Footer must summarize router models compactly.');
     check(await run().locator('.run-facts').getAttribute('title'), 'openrouter/free\nvendor/first:free\nvendor/second:free', 'All concrete models stay available in the tooltip.');
-    await receive({ type: 'message', who: 'Ошибка', text: 'Не удалось выполнить запрос' });
-    check(await page.locator('.message.error').last().textContent(), 'Не удалось выполнить запрос', 'Host errors must render as error messages.');
+    await activity({ type: 'aperture_run_end', status: 'stopped' });
+    check(await run().locator('.step.notice.stopped').count(), 1, 'The host end of a stopped run must not repeat "Ответ остановлен".');
 
     // ---------------------------------------------------------------- layout
     for (const width of [320, 410, 760]) {

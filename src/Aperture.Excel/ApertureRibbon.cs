@@ -8,12 +8,14 @@ namespace Aperture.Excel
     [ClassInterface(ClassInterfaceType.AutoDispatch)]
     public sealed class ApertureRibbon : Office.IRibbonExtensibility
     {
+        // Its own group at the end of the Home tab, where Claude and ChatGPT for Excel put theirs.
         public string GetCustomUI(string ribbonId)
         {
             return @"<customUI xmlns='http://schemas.microsoft.com/office/2009/07/customui'>
-              <ribbon><tabs><tab id='Aperture2Tab' label='Aperture2'>
-                <group id='Aperture2ChatGroup' label='Помощник Excel'>
-                  <button id='Aperture2ShowPane' label='Панель Aperture2' size='large' imageMso='ReviewShowComments' onAction='TogglePane' screentip='Показать или скрыть чат Aperture2' />
+              <ribbon><tabs><tab idMso='TabHome'>
+                <group id='Aperture2Group' label='Aperture2'>
+                  <button id='Aperture2ShowPane' label='Aperture2' size='large' imageMso='ReviewShowComments' onAction='TogglePane'
+                          screentip='Чат Aperture2' supertip='Показать или скрыть чат Aperture2 в окне этой книги.' />
                 </group>
               </tab></tabs></ribbon>
             </customUI>";

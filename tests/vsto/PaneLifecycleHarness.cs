@@ -72,9 +72,17 @@ internal static class PaneLifecycleHarness
     private static void ResetFake()
     {
         PiSession.Starts = 0;
+        PiSession.Resumes = 0;
         PiSession.Prompts = 0;
         PiSession.LastPromptThreadId = 0;
+        PiSession.LastResumeFile = null;
+        PiSession.LastTarget = null;
         PiSession.StartGate = new TaskCompletionSource<PiSession>(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private static bool HasNotice(ChatPaneView view, string level, string text, bool? inRun = null)
+    {
+        return view.Notices.Exists(item => item.Level == level && item.Text.Contains(text) && (inRun == null || item.InRun == inRun));
     }
 
     private static async Task VerifyAsync()
@@ -93,7 +101,7 @@ internal static class PaneLifecycleHarness
             Check(!Field<bool>(pane, "busy"), "Cancelled startup remained busy.");
         }
 
-        foreach (var method in new[] { "RebindAsync", "ResetChatAsync" })
+        foreach (var method in new[] { "ResetChatAsync" })
         {
             ResetFake();
             using (var pane = CreatePane())
@@ -128,6 +136,8 @@ internal static class PaneLifecycleHarness
         await VerifyPromptDispositionAsync();
         await VerifyToolCallFormationAsync();
         await VerifyScriptedRunAsync();
+        await VerifyRenamedBookAsync();
+        await VerifyNoticesAsync();
         Console.WriteLine("PASS: " + assertions + " total pane lifecycle/thread assertions (actual controls and handles; fake Pi/COM; no Excel/model).");
     }
 
@@ -158,7 +168,7 @@ internal static class PaneLifecycleHarness
             await FlushUi(pane);
             Check(View(pane).Activity.Exists(item => (string)item["assistantMessageEvent"]?["delta"] == "worker response"),
                 "Background RPC text was not forwarded to the timeline.");
-            Check(View(pane).StatusText == "worker diagnostic", "Background RPC diagnostic was not rendered.");
+            Check(View(pane).Notices.Count == 0, "A Pi stderr line was shown in the timeline while the request continued.");
             await Task.Run(() => running.EmitEvent(JObject.Parse("{type:'agent_settled'}")));
             await FlushUi(pane);
             Check(!Field<bool>(pane, "busy"), "Background settled event did not release busy state.");
@@ -171,7 +181,7 @@ internal static class PaneLifecycleHarness
             var send = CallWithoutContext(pane, "SendAsync");
             await Task.Run(() => PiSession.StartGate.SetException(new InvalidOperationException("test startup failure")));
             await send;
-            Check(View(pane).Transcript.Exists(text => text.Contains("test startup failure")), "Startup failure was not shown.");
+            Check(HasNotice(View(pane), "error", "test startup failure", false), "Startup failure was not shown as its own line.");
             Check(!Field<bool>(pane, "busy"), "Startup failure remained busy.");
             Check(PiSession.Prompts == 0, "Failed startup sent a prompt.");
         }
@@ -199,9 +209,10 @@ internal static class PaneLifecycleHarness
             Check(late.Disposed, "Cancelled late startup process leaked without a context.");
             Check(PiSession.Prompts == 0, "Stopped startup submitted a prompt without a context.");
             Check(!Field<bool>(pane, "busy"), "Stopped startup remained busy without a context.");
+            Check(HasNotice(View(pane), "info", "Запуск отменён · запрос не отправлен", false), "A Stop during startup did not say that nothing was sent.");
         }
 
-        foreach (var method in new[] { "RebindAsync", "ResetChatAsync" })
+        foreach (var method in new[] { "ResetChatAsync" })
         {
             Console.WriteLine("CASE: null-context " + method + " with asynchronous stop.");
             ResetFake();
@@ -231,7 +242,8 @@ internal static class PaneLifecycleHarness
             Check(PiSession.Prompts == 1, "Existing session did not receive the prompt.");
             await Task.Run(() => running.PromptGate.SetException(new InvalidOperationException("test prompt rejection")));
             await send;
-            Check(View(pane).Transcript.Exists(text => text.Contains("test prompt rejection")), "Prompt response failure was not shown.");
+            Check(HasNotice(View(pane), "error", "test prompt rejection", true), "Prompt response failure was not shown in the request's card.");
+            Check(HasTerminal(View(pane), "error"), "Prompt response failure did not end the request's card.");
             Check(!Field<bool>(pane, "busy"), "Prompt response failure left the pane busy.");
         }
 
@@ -250,13 +262,14 @@ internal static class PaneLifecycleHarness
             await send;
             Check(Field<bool>(pane, "busy"), "An uncertain prompt timeout released the turn.");
             Check(View(pane).Busy && View(pane).CanStop, "Uncertain prompt timeout did not keep Stop enabled.");
+            Check(HasNotice(View(pane), "warning", "Статус запроса неизвестен", true), "The unknown request status was not shown in its card.");
             var abort = CallWithoutContext(pane, "AbortAsync");
             Check(!View(pane).CanStop, "Duplicate Stop was not disabled while abort was pending.");
             await Task.Run(() => running.AbortGate.SetResult(true));
             await abort;
             Check(!Field<bool>(pane, "busy"), "Confirmed abort did not release the turn without a context.");
             Check(HasTerminal(View(pane), "stopped"), "Confirmed abort did not end the active timeline as stopped.");
-            Check(View(pane).StatusText.Contains("остановлен"), "Confirmed abort status was not rendered on the UI thread.");
+            Check(!View(pane).Notices.Exists(item => item.Level == "error"), "A confirmed abort was reported as an error.");
         }
 
         Console.WriteLine("CASE: null-context asynchronous abort failure preserves the active turn.");
@@ -274,7 +287,8 @@ internal static class PaneLifecycleHarness
             await abort;
             Check(Field<bool>(pane, "busy"), "Failed abort released a possibly active turn.");
             Check(View(pane).CanStop, "Failed abort left Stop permanently disabled.");
-            Check(View(pane).Transcript.Exists(text => text.Contains("test abort failure")), "Abort failure was not rendered on the UI thread.");
+            Check(HasNotice(View(pane), "warning", "Остановка не подтверждена · дождитесь завершения · test abort failure", true),
+                "Abort failure was not rendered in the request's card on the UI thread.");
         }
     }
 
@@ -352,21 +366,23 @@ internal static class PaneLifecycleHarness
                 "Authoritative final text must reach the timeline to reconcile an incomplete delta stream.");
             Check(Field<bool>(pane, "busy"), "agent_end incorrectly settled the run before Pi's terminal event.");
             await EmitAsync(pane, running, "{type:'agent_settled',aborted:false}");
-            Check(!Field<bool>(pane, "busy") && view.StatusText == "Готово" && !view.StatusIsError,
-                "A successful settled run did not return to idle.");
+            Check(!Field<bool>(pane, "busy") && view.Notices.Count == 0,
+                "A successful settled run did not return to idle without notices.");
 
             var stale = running.CaptureEventDelivery(JObject.Parse("{type:'tool_execution_start',toolCallId:'stale',toolName:'wrong-session'}"));
             var completedActivityCount = view.Activity.Count;
-            Field<WorkbookBinding>(pane, "binding").ValidationFailure = "preflight binding failed";
+            var lostBinding = Field<WorkbookBinding>(pane, "binding");
+            lostBinding.ValidationFailure = "preflight binding failed";
             await CallWithoutContext(pane, "SendAsync");
             Check(view.Activity.Count == completedActivityCount,
                 "A preflight error rewrote the previous completed activity.");
-            await CallWithoutContext(pane, "RebindAsync");
-            Check(view.Activity.Count == completedActivityCount,
-                "An idle rebind marked the previous successful run as stopped.");
+            Check(HasNotice(view, "error", "preflight binding failed", false), "A preflight binding error was not shown as its own line.");
+            Check(ReferenceEquals(Field<WorkbookBinding>(pane, "binding"), lostBinding), "A failed send replaced the chat's book.");
 
             await CallWithoutContext(pane, "ResetChatAsync");
             Check(view.Activity.Count == 0, "New chat did not clear old activity.");
+            Check(!ReferenceEquals(Field<WorkbookBinding>(pane, "binding"), lostBinding) && Field<WorkbookBinding>(pane, "binding").ValidationFailure == null,
+                "New chat did not bind the window's book again after the chat lost it.");
             await Task.Run(stale);
             await FlushUi(pane);
             Check(view.Activity.Count == 0 && !view.Transcript.Exists(text => text.Contains("wrong-session")),
@@ -382,8 +398,8 @@ internal static class PaneLifecycleHarness
             await EmitAsync(pane, running,
                 "{type:'message_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'provider unavailable'}}",
                 "{type:'agent_settled',aborted:false}");
-            Check(view.StatusIsError && view.StatusText != "Готово", "Provider error was overwritten by a successful status.");
             Check(HasTerminal(view, "error") && !Field<bool>(pane, "busy"), "Failed provider run left activity running.");
+            Check(view.Notices.Count == 0, "The provider error, shown by the card itself, was repeated as a notice.");
             await CallWithoutContext(pane, "SendAsync");
             await EmitAsync(pane, running,
                 "{type:'agent_start'}",
@@ -396,7 +412,7 @@ internal static class PaneLifecycleHarness
                 "{type:'message_end',message:{role:'assistant',content:[{type:'text',text:'recovered'}],stopReason:'stop'}}",
                 "{type:'auto_retry_end',success:true,attempt:1}",
                 "{type:'agent_settled',aborted:false}");
-            Check(view.StatusText == "Готово" && !view.StatusIsError && !Field<bool>(pane, "busy"),
+            Check(view.Activity.FindAll(item => (string)item["type"] == "aperture_run_end").Count == 1 && !Field<bool>(pane, "busy"),
                 "A successful Pi retry retained the earlier provider failure.");
         }
 
@@ -411,20 +427,23 @@ internal static class PaneLifecycleHarness
             await CallWithoutContext(pane, "AbortAsync");
             Check(HasTerminal(view, "stopped") && !Field<bool>(pane, "busy"), "Confirmed Stop left activity running.");
             await EmitAsync(pane, running, "{type:'agent_settled',aborted:true}");
-            Check(view.StatusText.Contains("остановлен") && !view.StatusIsError, "Aborted settlement became success or failure.");
+            Check(!HasTerminal(view, "error") && view.Notices.Count == 0, "Aborted settlement became a failure.");
             await CallWithoutContext(pane, "SendAsync");
+            await Task.Run(() => running.EmitDiagnostic("Pi exited."));
             await EmitAsync(pane, running,
                 "{type:'tool_execution_start',toolCallId:'interrupted',toolName:'excel_target',args:{}}",
                 "{type:'process_exit'}");
-            Check(HasTerminal(view, "error") && view.StatusIsError && !Field<bool>(pane, "busy"), "Process exit left activity running.");
+            Check(HasTerminal(view, "error") && !Field<bool>(pane, "busy"), "Process exit left activity running.");
+            Check(HasNotice(view, "error", "Агент остановлен или вернул ошибку · Pi exited.", true),
+                "An agent that ended during the request was not explained in its card with Pi's last stderr line.");
             Check(view.Activity.Exists(item => (string)item["type"] == "process_exit"), "Process-exit lifecycle event was not forwarded.");
             var stale = running.CaptureEventDelivery(JObject.Parse("{type:'agent_settled',aborted:false}"));
-            await CallWithoutContext(pane, "RebindAsync");
-            var status = view.StatusText;
+            await CallWithoutContext(pane, "ResetChatAsync");
+            var notices = view.Notices.Count;
             var count = view.Activity.Count;
             await Task.Run(stale);
             await FlushUi(pane);
-            Check(view.Activity.Count == count && view.StatusText == status, "Old-session settlement overwrote rebound status.");
+            Check(view.Activity.Count == count && view.Notices.Count == notices, "Old-session settlement reached the new chat.");
         }
     }
 
@@ -592,11 +611,194 @@ internal static class PaneLifecycleHarness
                 await UntilAsync(pane, () => run.State != "running", "An unanswered Stop never ended the request.");
                 Check(run.State == "cancelled" && running.Disposed && !Field<bool>(pane, "busy") && Field<PiSession>(pane, "session") == null,
                     "The forced stop did not end this chat's Pi.");
-                Check(View(pane).Transcript.Exists(text => text.StartsWith("Система: Агент не остановился")), "The forced stop was not explained in the chat.");
+                Check(HasNotice(View(pane), "warning", "Агент не остановился", true), "The forced stop was not explained in the request's card.");
                 running.AbortGate.SetResult(true);
             }
         }
         finally { delay.SetValue(null, budget); }
+        await VerifyScriptedPaneOpeningAsync();
+    }
+
+    private static ChatPaneControl CreatePaneWithoutWindow()
+    {
+        // A pane just added to Excel: the control exists, its window does not yet.
+        return new ChatPaneControl(() => new WorkbookBinding(), () => true, () => { });
+    }
+
+    private static async Task VerifyScriptedPaneOpeningAsync()
+    {
+        Console.WriteLine("CASE: automation Start on a pane without its window waits for it, then sends; Cancel and timeout end the wait.");
+        ResetFake();
+        using (var pane = CreatePaneWithoutWindow())
+        {
+            var run = new ScriptedRun();
+            pane.StartScripted("audit", null, null, run);
+            Check(!pane.IsHandleCreated && run.State == "running" && Field<bool>(pane, "busy") && PiSession.Starts == 0,
+                "Start did not admit the request while the new pane had no window.");
+            CreateHandles(pane);
+            await UntilAsync(pane, () => PiSession.Starts == 1, "The request did not start once the pane got its window.");
+            await Task.Run(() => PiSession.StartGate.SetResult(new PiSession()));
+            await UntilAsync(pane, () => PiSession.Prompts == 1, "The scripted prompt was not sent after the pane opened.");
+            Check(run.State == "running" && View(pane).Transcript.Count == 1, "The opened pane did not show the scripted request.");
+        }
+        ResetFake();
+        using (var pane = CreatePaneWithoutWindow())
+        {
+            var run = new ScriptedRun();
+            pane.StartScripted("audit", null, null, run);
+            pane.Stop();
+            Check(run.State == "cancelled" && !Field<bool>(pane, "busy") && !View(pane).Scripted, "Cancel while the pane opened did not end the request.");
+            CreateHandles(pane);
+            await FlushUi(pane);
+            Check(PiSession.Starts == 0 && PiSession.Prompts == 0, "A cancelled request started when the pane opened.");
+        }
+        ResetFake();
+        var timeout = typeof(ChatPaneControl).GetField("paneOpenTimeout", BindingFlags.Static | BindingFlags.NonPublic);
+        var budget = timeout.GetValue(null);
+        timeout.SetValue(null, TimeSpan.FromMilliseconds(200));
+        try
+        {
+            using (var pane = CreatePaneWithoutWindow())
+            {
+                var run = new ScriptedRun();
+                pane.StartScripted("audit", null, null, run);
+                // The pane never gets its window; its timer runs on this thread's message loop.
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                while (run.State == "running" && DateTime.UtcNow < deadline) await Task.Delay(20);
+                Check(run.State == "failed" && run.Error.Contains("не открылась") && !Field<bool>(pane, "busy") && PiSession.Starts == 0,
+                    "A pane that never opened left the scripted request running.");
+            }
+        }
+        finally { timeout.SetValue(null, budget); }
+    }
+
+    private static async Task VerifyRenamedBookAsync()
+    {
+        Console.WriteLine("CASE: after Save As the next request continues the same Pi history with a Pi/MCP bound to the new name.");
+        ResetFake();
+        using (var pane = CreatePane())
+        {
+            var view = View(pane);
+            var first = await StartSessionAsync(pane);
+            await EmitAsync(pane, first, "{type:'agent_settled',aborted:false}");
+            var workbookId = pane.BoundWorkbookId;
+            Field<WorkbookBinding>(pane, "binding").RenamedTo = "Модель.xlsx";
+            ResetFake();
+            var send = CallWithoutContext(pane, "SendAsync");
+            Check(PiSession.Resumes == 1 && PiSession.Starts == 0 && PiSession.LastResumeFile == "history.jsonl",
+                "The renamed book did not continue the chat's Pi history.");
+            Check(first.Disposed, "The Pi/MCP bound to the old name was not stopped before the restart.");
+            Check(PiSession.LastTarget.WorkbookName == "Модель.xlsx" && PiSession.LastTarget.WorkbookId == workbookId,
+                "The restarted MCP did not get the same book under its new name.");
+            var resumed = new PiSession();
+            await Task.Run(() => PiSession.StartGate.SetResult(resumed));
+            await send;
+            Check(PiSession.Prompts == 1 && pane.BoundWorkbookId == workbookId, "The follow-up was not sent to the continued chat.");
+            Check(view.Transcript.Count == 2 && view.Notices.Count == 0, "Continuing the chat cleared it or announced the rebinding.");
+            await EmitAsync(pane, resumed, "{type:'agent_settled',aborted:false}");
+            ResetFake();
+            await CallWithoutContext(pane, "SendAsync");
+            Check(PiSession.Starts == 0 && PiSession.Resumes == 0 && PiSession.Prompts == 1, "An unchanged book restarted the continued Pi.");
+            await EmitAsync(pane, resumed, "{type:'agent_settled',aborted:false}");
+        }
+
+        Console.WriteLine("CASE: a failed continuation is retried by the next request; New chat starts afresh.");
+        ResetFake();
+        using (var pane = CreatePane())
+        {
+            var view = View(pane);
+            var first = await StartSessionAsync(pane);
+            await EmitAsync(pane, first, "{type:'agent_settled',aborted:false}");
+            Field<WorkbookBinding>(pane, "binding").RenamedTo = "Модель.xlsx";
+            ResetFake();
+            var send = CallWithoutContext(pane, "SendAsync");
+            await Task.Run(() => PiSession.StartGate.SetException(new InvalidOperationException("test resume failure")));
+            await send;
+            Check(HasNotice(view, "error", "test resume failure", false) && !Field<bool>(pane, "busy") && PiSession.Prompts == 0,
+                "A failed continuation was not reported or still sent the prompt.");
+            ResetFake();
+            send = CallWithoutContext(pane, "SendAsync");
+            Check(PiSession.Resumes == 1 && PiSession.Starts == 0 && PiSession.LastResumeFile == "history.jsonl",
+                "The next request did not retry the chat's history.");
+            await Task.Run(() => PiSession.StartGate.SetCanceled());
+            await send;
+            ResetFake();
+            await CallWithoutContext(pane, "ResetChatAsync");
+            await StartSessionAsync(pane);
+            Check(PiSession.Starts == 1 && PiSession.Resumes == 0, "New chat continued the old history.");
+        }
+
+        Console.WriteLine("CASE: a renamed book whose agent already ended starts a new session and says why.");
+        ResetFake();
+        using (var pane = CreatePane())
+        {
+            var view = View(pane);
+            var first = await StartSessionAsync(pane);
+            await EmitAsync(pane, first, "{type:'agent_settled',aborted:false}");
+            first.Dispose(); // the fake Pi is not running once disposed
+            Field<WorkbookBinding>(pane, "binding").RenamedTo = "Модель.xlsx";
+            ResetFake();
+            var send = CallWithoutContext(pane, "SendAsync");
+            Check(PiSession.Starts == 1 && PiSession.Resumes == 0, "An ended agent was resumed instead of starting a new session.");
+            Check(HasNotice(view, "info", "Книга теперь называется «Модель.xlsx»", false), "The new session after the rename was not explained.");
+            await Task.Run(() => PiSession.StartGate.SetResult(new PiSession()));
+            await send;
+            Check(PiSession.Prompts == 1, "The request after the rename was not sent.");
+        }
+
+        Console.WriteLine("CASE: automation Start on a renamed book binds it anew in a new chat.");
+        ResetFake();
+        using (var pane = CreatePane())
+        {
+            var first = await StartSessionAsync(pane);
+            await EmitAsync(pane, first, "{type:'agent_settled',aborted:false}");
+            var workbookId = pane.BoundWorkbookId;
+            Field<WorkbookBinding>(pane, "binding").RenamedTo = "Модель.xlsx";
+            ResetFake();
+            var run = new ScriptedRun();
+            pane.StartScripted("audit", null, null, run);
+            await Task.Run(() => PiSession.StartGate.SetResult(new PiSession()));
+            await UntilAsync(pane, () => PiSession.Prompts == 1, "The scripted prompt was not sent.");
+            Check(PiSession.Starts == 1 && PiSession.Resumes == 0 && pane.BoundWorkbookId != workbookId,
+                "A scripted Start on a renamed book did not bind it anew in a new chat.");
+        }
+    }
+
+    private static async Task VerifyNoticesAsync()
+    {
+        Console.WriteLine("CASE: refusals, failed capture and an agent that ends between requests are their own lines; progress is not reported.");
+        ResetFake();
+        using (var pane = new ChatPaneControl(() => new WorkbookBinding(), () => false, () => { }))
+        {
+            CreateHandles(pane);
+            await CallWithoutContext(pane, "SendAsync");
+            await CallWithoutContext(pane, "SendAsync");
+            Check(View(pane).Notices.Count == 2 && HasNotice(View(pane), "error", "В другом окне Excel уже выполняется запрос Aperture2", false)
+                && PiSession.Starts == 0, "A request refused for another window was not shown as its own line.");
+        }
+        ResetFake();
+        using (var pane = CreatePane())
+        {
+            var running = await StartSessionAsync(pane);
+            await EmitAsync(pane, running,
+                "{type:'tool_execution_start',toolCallId:'a',toolName:'excel_target',args:{}}",
+                "{type:'tool_execution_end',toolCallId:'a',toolName:'excel_target',result:{},isError:false}",
+                "{type:'auto_retry_start',attempt:1,maxAttempts:3}",
+                "{type:'auto_retry_end',success:true,attempt:1}",
+                "{type:'agent_settled',aborted:false}");
+            Check(View(pane).Notices.Count == 0 && View(pane).Activity.Exists(item => (string)item["type"] == "auto_retry_start"),
+                "Progress was reported as notices, or the retry did not reach the card.");
+            await Task.Run(() => running.EmitDiagnostic("fatal: worker crashed"));
+            await EmitAsync(pane, running, "{type:'process_exit'}");
+            Check(HasNotice(View(pane), "error", "Агент остановлен или вернул ошибку · fatal: worker crashed", false),
+                "An agent that ended between requests was not reported on its own line.");
+        }
+        ResetFake();
+        using (var pane = new ChatPaneControl(() => { throw new InvalidOperationException("Окно больше не связано с открытой книгой."); }, () => true, () => { }))
+        {
+            CreateHandles(pane);
+            Check(HasNotice(View(pane), "error", "Окно больше не связано", false), "A failed capture at pane creation was not shown.");
+        }
     }
 
     [STAThread]

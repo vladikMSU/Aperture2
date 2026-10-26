@@ -3,6 +3,10 @@
 This verifies add-in loading and the real Pi/MCP plumbing, not human UI acceptance.
 No provider credentials are needed unless --model-smoke is explicitly enabled.
 No workbook is saved.
+
+Panes open only on request (the Home tab button or the COM entry's Start). The smoke first checks
+that none opens by itself, then opens each pane with Start and an immediate Cancel: the startup of
+Pi is cancelled before the prompt is sent, so no model request is made (checked by the absent history).
 """
 from __future__ import annotations
 
@@ -66,6 +70,34 @@ def pane_snapshot(automation, expected_hwnds: set[int], require_view: bool = Tru
 def pane_identities(status: dict) -> dict:
     return {pane["windowHwnd"]: (pane["paneId"], pane["boundWorkbookId"])
             for pane in status["panes"]}
+
+
+OPEN_PANE_PROMPT = "Ответь одним словом: готово."
+
+
+def open_pane_without_request(automation, book_name: str) -> dict:
+    """Start creates and shows the book's pane and begins starting Pi; Cancel right away stops that
+    startup before the prompt is sent. Pi writes its history file only with the first message."""
+    automation.Start(book_name, OPEN_PANE_PROMPT, "", "")
+    automation.Cancel()
+    deadline = time.monotonic() + 30
+    state = json.loads(str(automation.GetState()))
+    while state["state"] == "running" and time.monotonic() < deadline:
+        pump_for(0.2)
+        state = json.loads(str(automation.GetState()))
+    assert state["state"] == "cancelled", state
+    history = state.get("log_path")
+    assert not history or not Path(history).exists(), f"The prompt reached Pi: {history}"
+    return state
+
+
+def wait_views(automation, expected_hwnds: set[int]) -> dict:
+    deadline = time.monotonic() + 30
+    while True:
+        status = pane_snapshot(automation, expected_hwnds, require_view=False)
+        if all(pane.get("viewReady") for pane in status["panes"]) or time.monotonic() > deadline:
+            return pane_snapshot(automation, expected_hwnds)
+        pump_for(0.2)
 
 
 def verify_owned_process_exit(handle, pid: int, creation: str, quit_requested: bool,
@@ -237,9 +269,9 @@ def main() -> int:
             status = json.loads(str(automation.GetInfo()))
             report["checks"]["vsto"] = status
             assert status.get("loaded") is True, status
-            assert status.get("paneCount", 0) >= 1, status
+            assert status.get("paneCount") == 0, "A pane opened by itself at startup: " + json.dumps(status)
             assert status.get("excelProcessId") == pid, status
-            print("VSTO connected automatically and task pane created.", flush=True)
+            print("VSTO connected automatically; no pane opened by itself.", flush=True)
 
         # The captured workbook must not follow ActiveWorkbook. Both books and
         # their entire process belong to this test, so no user workbook is used.
@@ -258,17 +290,20 @@ def main() -> int:
         assert control_hwnd != target["workbookHwnd"]
 
         if not args.skip_vsto:
-            # Let the already-closed bootstrap pane be swept, then observe three
+            # Switching books must not open panes: they open only on request.
+            for _ in range(2):
+                workbook.Activate()
+                control_workbook.Activate()
+                pump_for(0.8)
+            without_request = json.loads(str(automation.GetInfo()))
+            assert without_request["paneCount"] == 0, "A pane opened on window activation: " + json.dumps(without_request)
+            report["checks"]["noPaneWithoutRequest"] = {"windowsActivated": 4, "paneCount": 0}
+            # Open both panes as a script would, without a model request, then observe three
             # full 1.5-second cleanup ticks. Recreating panes silently loses chat.
-            pump_for(1.8)
+            opened = [open_pane_without_request(automation, str(book.Name)) for book in (workbook, control_workbook)]
+            report["checks"]["panesOpenedByStartWithoutRequest"] = opened
             expected_hwnds = {target["workbookHwnd"], control_hwnd}
-            view_deadline = time.monotonic() + 30
-            while time.monotonic() < view_deadline:
-                initial = pane_snapshot(automation, expected_hwnds, require_view=False)
-                if all(pane.get("viewReady") for pane in initial["panes"]):
-                    break
-                pump_for(0.2)
-            snapshots = [pane_snapshot(automation, expected_hwnds)]
+            snapshots = [wait_views(automation, expected_hwnds)]
             stable_panes = pane_identities(snapshots[0])
             for _ in range(3):
                 workbook.Activate()

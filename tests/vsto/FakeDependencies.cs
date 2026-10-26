@@ -11,8 +11,8 @@ namespace Aperture.Runtime
 {
     public sealed class ExcelTarget
     {
-        public string WorkbookId = "test";
-        public string WorkbookName = "test";
+        public string WorkbookId = Guid.NewGuid().ToString("N");
+        public string WorkbookName = "test.xlsx";
     }
 
     public sealed class PiEvent : EventArgs
@@ -29,8 +29,10 @@ namespace Aperture.Runtime
     public sealed class PiSession : IDisposable
     {
         public static TaskCompletionSource<PiSession> StartGate;
-        public static int Starts, Prompts, LastPromptThreadId;
+        public static int Starts, Resumes, Prompts, LastPromptThreadId;
         public static object LastOptions;
+        public static ExcelTarget LastTarget;
+        public static string LastResumeFile;
         public TaskCompletionSource<bool> StopGate;
         public TaskCompletionSource<bool> PromptGate;
         public TaskCompletionSource<bool> AbortGate;
@@ -61,8 +63,17 @@ namespace Aperture.Runtime
         {
             Starts++;
             LastOptions = options;
+            LastTarget = target;
             // Intentionally return a late process even after cancellation, exercising
             // the pane's defensive ownership cleanup rather than the runtime's checks.
+            return StartGate.Task;
+        }
+        public static Task<PiSession> ResumeAsync(object options, ExcelTarget target, string sessionFile, CancellationToken cancellation)
+        {
+            Resumes++;
+            LastOptions = options;
+            LastTarget = target;
+            LastResumeFile = sessionFile;
             return StartGate.Task;
         }
 
@@ -94,13 +105,20 @@ namespace Aperture.Excel
 
     // WebView2 is intentionally replaced by an owner-thread-checked view. The
     // controller is real; the tests do not require browser downloads or Excel.
+    internal sealed class Notice
+    {
+        internal string Level, Title, Detail;
+        internal bool InRun;
+        internal string Text { get { return Title + (Detail == null ? "" : " · " + Detail); } }
+    }
+
     internal sealed class ChatPaneView : UserControl
     {
         private readonly int ownerThread = Thread.CurrentThread.ManagedThreadId;
-        internal string BindingText, StatusText;
-        internal bool Busy, CanStop, PromptCleared, StatusIsError, Scripted;
+        internal bool Busy, CanStop, PromptCleared, Scripted;
         internal readonly List<string> Transcript = new List<string>();
         internal readonly List<JObject> Activity = new List<JObject>();
+        internal readonly List<Notice> Notices = new List<Notice>();
         internal event EventHandler<ChatPaneCommandEventArgs> Command;
         internal bool IsReady { get { return true; } }
         internal string InitializationError { get { return null; } }
@@ -109,16 +127,17 @@ namespace Aperture.Excel
         {
             if (Thread.CurrentThread.ManagedThreadId != ownerThread)
                 throw new InvalidOperationException("ChatPaneView method was called outside its owning UI thread.");
-            var handle = Handle;
+            // Touching Handle would create the pane's window as a side effect; the real view only queues.
+            if (IsHandleCreated) { var handle = Handle; }
         }
 
-        internal void SetBinding(string text) { VerifyThread(); BindingText = text; }
-        internal void SetStatus(string text, bool error) { VerifyThread(); StatusText = text; StatusIsError = error; }
+        internal void AppendNotice(string level, string title, string detail, bool inRun)
+        { VerifyThread(); Notices.Add(new Notice { Level = level, Title = title, Detail = detail, InRun = inRun }); }
         internal void SetBusy(bool busy, bool canStop = true) { VerifyThread(); Busy = busy; CanStop = canStop; }
         internal void SetScripted(bool active) { VerifyThread(); Scripted = active; }
         internal void AppendMessage(string who, string text) { VerifyThread(); Transcript.Add(who + ": " + text); }
         internal void ApplyActivity(JObject rawPiEvent) { VerifyThread(); Activity.Add((JObject)rawPiEvent.DeepClone()); }
-        internal void ClearTranscript() { VerifyThread(); Transcript.Clear(); Activity.Clear(); }
+        internal void ClearTranscript() { VerifyThread(); Transcript.Clear(); Activity.Clear(); Notices.Clear(); }
         internal void ClearPrompt() { VerifyThread(); PromptCleared = true; }
         internal void EmitCommand(string command, string text = null)
         {
@@ -131,12 +150,25 @@ namespace Aperture.Excel
     {
         private readonly int uiThreadId = Thread.CurrentThread.ManagedThreadId;
         internal string ValidationFailure;
+        // The captured book got this name by its first save or Save As; null while it keeps its name.
+        internal string RenamedTo;
         internal Aperture.Runtime.ExcelTarget Target = new Aperture.Runtime.ExcelTarget();
         internal void Validate()
         {
+            VerifyThread();
+            if (ValidationFailure != null) throw new InvalidOperationException(ValidationFailure);
+            if (RenamedTo != null) throw new InvalidOperationException("renamed");
+        }
+        internal WorkbookBinding FollowRename()
+        {
+            VerifyThread();
+            if (RenamedTo == null || ValidationFailure != null) return this;
+            return new WorkbookBinding { Target = new Aperture.Runtime.ExcelTarget { WorkbookId = Target.WorkbookId, WorkbookName = RenamedTo } };
+        }
+        private void VerifyThread()
+        {
             if (Thread.CurrentThread.ManagedThreadId != uiThreadId)
                 throw new InvalidOperationException("Workbook validation left the owning UI thread.");
-            if (ValidationFailure != null) throw new InvalidOperationException(ValidationFailure);
         }
     }
 

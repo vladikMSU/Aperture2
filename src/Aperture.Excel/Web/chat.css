@@ -15,6 +15,7 @@
   --danger: #ef7479;
   --danger-soft: rgba(239, 116, 121, .1);
   --warning: #dcae58;
+  --warning-soft: rgba(220, 174, 88, .1);
   --link: #7fb8f5;
   --code-bg: rgba(255, 255, 255, .05);
   --user-bg: #2e3330;
@@ -41,6 +42,7 @@
     --danger: #c4314b;
     --danger-soft: rgba(196, 49, 75, .07);
     --warning: #a46a00;
+    --warning-soft: rgba(164, 106, 0, .08);
     --link: #0f6cbd;
     --code-bg: rgba(0, 0, 0, .045);
     --user-bg: #e8f1eb;
@@ -92,22 +94,18 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
   flex: none;
 }
 
-.workbook {
+.brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   flex: 1;
   min-width: 0;
+  color: var(--text-2);
   font-weight: 600;
+  letter-spacing: .01em;
 }
 
-.workbook span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workbook-icon {
+.brand-icon {
   width: 16px;
   height: 16px;
   flex: none;
@@ -208,13 +206,15 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.message.system {
+/* Host notices outside a request: errors and warnings as a tinted line, notes as quiet text. */
+.message.notice.info {
   color: var(--text-3);
   font-size: 12px;
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
-.message.error {
+.message.notice.error, .message.notice.warning {
   display: flex;
   align-items: flex-start;
   gap: 8px;
@@ -224,6 +224,8 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.message.notice.warning { background: var(--warning-soft); }
+
 .message-icon {
   width: 15px;
   height: 15px;
@@ -231,6 +233,30 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
   margin-top: 2px;
   color: var(--danger);
 }
+
+.message.notice.warning .message-icon { color: var(--warning); }
+.message.notice.again { animation: notice-again .9s ease-out; }
+
+@keyframes notice-again {
+  from { box-shadow: 0 0 0 2px var(--line-strong); }
+  to { box-shadow: 0 0 0 2px transparent; }
+}
+
+.notice-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.notice-detail {
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.message.notice.info .notice-detail { color: var(--text-3); }
 
 /* ------------------------------------------------------------ run: one request */
 .run {
@@ -474,7 +500,11 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 }
 
 .step.notice .step-icon { color: var(--warning); }
-.step.notice.stopped, .step.notice.stopped .step-icon { color: var(--text-3); }
+.step.notice.stopped, .step.notice.stopped .step-icon,
+.step.notice.info, .step.notice.info .step-icon { color: var(--text-3); }
+.step.host-notice { align-items: flex-start; }
+.step.host-notice .step-icon { margin-top: 2px; }
+.step.host-notice .notice-detail { font-size: 11.5px; }
 
 .step.error {
   display: flex;
@@ -501,7 +531,6 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes pulse { 50% { opacity: .35; } }
 
 /* ------------------------------------------------------------ Markdown */
 .markdown { min-width: 0; overflow-wrap: anywhere; }
@@ -613,8 +642,12 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
   padding: 6px 12px 12px;
 }
 
+/* One row: the prompt grows upwards, Send/Stop stays at its bottom right. */
 .composer {
-  padding: 8px 8px 6px 12px;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 6px 6px 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface);
@@ -628,10 +661,11 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 
 #prompt {
   display: block;
-  width: 100%;
-  min-height: 21px;
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
   max-height: 180px;
-  padding: 1px 0;
+  padding: 4px 0;
   border: 0;
   outline: 0;
   resize: none;
@@ -645,38 +679,8 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 
 .composer-bar {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-  color: var(--text-3);
-  font-size: 11.5px;
-}
-
-#status-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.status-dot {
-  width: 6px;
-  height: 6px;
   flex: none;
-  border-radius: 50%;
-  background: var(--accent);
 }
-
-.status.working .status-dot { animation: pulse 1.2s ease-in-out infinite; }
-.status.error { color: var(--danger); }
-.status.error .status-dot { background: var(--danger); }
 
 .send-button, .stop-button {
   display: grid;
@@ -710,6 +714,7 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 .stop-button:disabled { opacity: .5; cursor: default; }
 
 @media (prefers-reduced-motion: reduce) {
-  .spinner, .status.working .status-dot { animation-duration: 3s; }
+  .spinner { animation-duration: 3s; }
+  .message.notice.again { animation: none; }
   .run-chevron, .composer { transition: none; }
 }

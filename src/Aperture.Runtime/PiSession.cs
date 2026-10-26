@@ -88,7 +88,20 @@ namespace Aperture.Runtime
             return await StartPreparedAsync(config, options.CommandTimeoutSeconds, cancellationToken).ConfigureAwait(false);
         }
 
-        internal static async Task<PiSession> StartPreparedAsync(SessionConfiguration config, int timeoutSeconds, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// Continues the history of an ended chat in a new Pi and MCP bound to <paramref name="target"/>,
+        /// for example the same live book after Save As. Pi opens <paramref name="sessionFile"/> with
+        /// <c>--session</c> and appends to it; the previous Pi of that chat must already be stopped.
+        /// </summary>
+        public static async Task<PiSession> ResumeAsync(PiSessionOptions options, ExcelTarget target, string sessionFile, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(sessionFile)) throw new ArgumentException("A Pi session file is required.", nameof(sessionFile));
+            var config = await Task.Run(() => SessionConfiguration.Create(options, target, sessionFile), cancellationToken).ConfigureAwait(false);
+            return await StartPreparedAsync(config, options.CommandTimeoutSeconds, cancellationToken, Path.GetFullPath(sessionFile)).ConfigureAwait(false);
+        }
+
+        internal static async Task<PiSession> StartPreparedAsync(SessionConfiguration config, int timeoutSeconds, CancellationToken cancellationToken = default,
+            string expectedSessionFile = null)
         {
             var session = await Task.Run(() => new PiSession(config, timeoutSeconds), cancellationToken).ConfigureAwait(false);
             try
@@ -96,6 +109,9 @@ namespace Aperture.Runtime
                 await session.input.WriteAsync("\n").ConfigureAwait(false); // release process gate only after job assignment
                 var state = await session.GetStateAsync(cancellationToken).ConfigureAwait(false);
                 session.SessionFile = (string)state["data"]?["sessionFile"];
+                if (expectedSessionFile != null && (session.SessionFile == null ||
+                    !string.Equals(Path.GetFullPath(session.SessionFile), expectedSessionFile, StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidOperationException("Pi opened another history than the chat's " + expectedSessionFile + ".");
                 return session;
             }
             catch (Exception error)
@@ -190,7 +206,7 @@ namespace Aperture.Runtime
                 {
                     if (Volatile.Read(ref stopping) == 0)
                     {
-                        NotifyDiagnostic(failure?.Message ?? "Pi exited. Start a new chat to reconnect.");
+                        NotifyDiagnostic(failure?.Message ?? "Pi exited; the next request starts a new session.");
                         NotifyEvent(new JObject { ["type"] = "process_exit" });
                     }
                     job.Dispose();

@@ -38,7 +38,9 @@ namespace Aperture.Runtime
             "Do not repeat a timed-out write blindly. Do not open, save, close or replace books as a side effect. ";
         internal static readonly string SystemPromptSha256 = Sha256(SystemPrompt);
 
-        public static SessionConfiguration Create(PiSessionOptions options, ExcelTarget target)
+        /// <param name="resumeSessionFile">Pi history of an earlier chat (its <c>history\*.jsonl</c>) to continue
+        /// in that chat's folder with a new target; null starts a new chat in a new folder.</param>
+        public static SessionConfiguration Create(PiSessionOptions options, ExcelTarget target, string resumeSessionFile = null)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
             if (string.IsNullOrWhiteSpace(options.RepositoryRoot)) throw new ArgumentException("RepositoryRoot is required.");
@@ -55,11 +57,28 @@ namespace Aperture.Runtime
                 ? Path.Combine(root, ".venv", "Scripts", "python.exe") : Path.GetFullPath(options.PythonPath);
             if (options.EnableExcelTools) RequireFile(python, "Python environment is missing. Build Aperture2.sln in Visual Studio first.");
             string node = ResolveExecutable(options.NodePath, "node.exe");
-            string state = string.IsNullOrWhiteSpace(options.StateRoot)
-                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Aperture2", "sessions")
-                : Path.GetFullPath(options.StateRoot);
-            string dir = Path.Combine(state, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N"));
-            System.IO.Directory.CreateDirectory(Path.Combine(dir, ".pi"));
+            string dir;
+            string sessionFile = null;
+            if (resumeSessionFile == null)
+            {
+                string state = string.IsNullOrWhiteSpace(options.StateRoot)
+                    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Aperture2", "sessions")
+                    : Path.GetFullPath(options.StateRoot);
+                dir = Path.Combine(state, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N"));
+                System.IO.Directory.CreateDirectory(Path.Combine(dir, ".pi"));
+            }
+            else
+            {
+                // The chat's own folder: <chat>\history\<session>.jsonl. Pi opens the session with the
+                // folder as its working directory, so the project MCP configuration, the target and
+                // the system prompt there are rewritten for the new target; the history is kept.
+                sessionFile = Path.GetFullPath(resumeSessionFile);
+                string history = Path.GetDirectoryName(sessionFile);
+                dir = Path.GetDirectoryName(history);
+                if (!string.Equals(Path.GetFileName(history), "history", StringComparison.OrdinalIgnoreCase)
+                    || !System.IO.Directory.Exists(Path.Combine(dir, ".pi")))
+                    throw new ArgumentException("Not the Pi history of an Aperture chat: " + sessionFile);
+            }
             string contextPath = Path.Combine(dir, "target.json");
             if (target != null) Write(contextPath, JObject.FromObject(target));
 
@@ -97,7 +116,10 @@ namespace Aperture.Runtime
 
             var args = new List<string> { launcher, cli, "--mode", "rpc", "--approve", "--no-extensions", "--no-skills",
                 "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--offline",
-                "--system-prompt", instructions, "--session-dir", Path.Combine(dir, "history"), "--name", "Aperture Excel" };
+                "--system-prompt", instructions, "--session-dir", Path.Combine(dir, "history") };
+            // --session opens that file and appends to it. Pi records the changed binding line as a
+            // system prompt update at the start of the next run; --name would append another name entry.
+            args.AddRange(sessionFile == null ? new[] { "--name", "Aperture Excel" } : new[] { "--session", sessionFile });
             args.AddRange(new[] { "--extension", Path.Combine(root, "src", "Aperture.Runtime", "aperture-status.mjs") });
             if (options.EnableExcelTools) args.AddRange(new[] { "--extension", "builtin:mcp", "--tools", "mcp__aperture_excel__*" });
             else args.Add("--no-mcp");

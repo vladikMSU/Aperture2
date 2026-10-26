@@ -47,6 +47,8 @@ namespace Aperture.Runtime
             if (!string.IsNullOrWhiteSpace(options.Provider) && string.IsNullOrWhiteSpace(options.Model))
                 throw new ArgumentException("Pi requires Model when Provider is specified.");
             if (options.CommandTimeoutSeconds <= 0) throw new ArgumentException("Command timeout must be positive.");
+            if (!string.IsNullOrWhiteSpace(options.Thinking) && Array.IndexOf(PiSessionOptions.ThinkingLevels, options.Thinking) < 0)
+                throw new ArgumentException("Unknown thinking level \"" + options.Thinking + "\". Valid: " + string.Join(", ", PiSessionOptions.ThinkingLevels) + ".");
             if (options.EnableExcelTools) (target ?? throw new ArgumentNullException(nameof(target))).Validate();
             string root = Path.GetFullPath(options.RepositoryRoot);
             string cli = Path.Combine(root, "external", "pi", "packages", "coding-agent", "dist", "bundle", "cli.js");
@@ -125,6 +127,9 @@ namespace Aperture.Runtime
             else args.Add("--no-mcp");
             if (!string.IsNullOrWhiteSpace(options.Model)) args.AddRange(new[] { "--model", options.Model });
             if (!string.IsNullOrWhiteSpace(options.Provider)) args.AddRange(new[] { "--provider", options.Provider });
+            // Pi clamps the level to the model (an unsupported one becomes the nearest supported) and
+            // records the effective level as a thinking_level_change entry of the session.
+            if (!string.IsNullOrWhiteSpace(options.Thinking)) args.AddRange(new[] { "--thinking", options.Thinking });
             return new SessionConfiguration { Directory = dir, Node = node, Arguments = string.Join(" ", args.Select(Quote)), ProviderEnvironment = providerEnvironment };
         }
 

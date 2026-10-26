@@ -12,7 +12,7 @@ process.stdin.on("data", chunk => {
     const command = JSON.parse(line);
     if (command.type === "get_state") {
       setTimeout(() => send({type:"response", id:command.id, success:true, command:command.type,
-        data:{tag:command.tag, childPid:child.pid}}), command.delay ?? 0);
+        data:{tag:command.tag, childPid:child.pid, thinkingLevel:"high"}}), command.delay ?? 0);
     } else if (command.type === "get_messages") {
       send({type:"response",id:command.id,success:false,command:command.type,error:"fixture rejection"});
     } else if (command.type === "prompt") {

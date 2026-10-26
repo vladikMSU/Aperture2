@@ -40,6 +40,7 @@ namespace Aperture.Runtime
         public string PromptDisposition = "started";
         public bool StateStreaming;
         public string SessionFile = "history.jsonl";
+        public string ThinkingLevel = "high"; // as Pi's get_state reports it after clamping
         public bool IsRunning { get { return !Disposed; } }
 
         public event EventHandler<PiEvent> EventReceived;
@@ -174,9 +175,14 @@ namespace Aperture.Excel
 
     internal sealed class PaneSettings
     {
-        internal string Provider, Model;
+        internal string Provider, Model, Thinking;
         internal static PaneSettings Load() { return new PaneSettings(); }
-        internal PaneSettings WithModel(string provider, string model) { return new PaneSettings { Provider = provider, Model = model }; }
+        internal PaneSettings ForChat(string provider, string model, string thinking)
+        {
+            var copy = new PaneSettings { Provider = Provider, Model = Model, Thinking = thinking };
+            if (!String.IsNullOrWhiteSpace(provider) || !String.IsNullOrWhiteSpace(model)) { copy.Provider = provider; copy.Model = model; }
+            return copy;
+        }
         internal object ToOptions() { return this; }
     }
 

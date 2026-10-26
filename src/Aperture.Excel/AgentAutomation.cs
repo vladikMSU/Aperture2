@@ -19,6 +19,9 @@ namespace Aperture.Excel
         string GetState();
         /// <summary>Same as the Stop button; the request ends within about 10 seconds.</summary>
         void Cancel();
+        /// <summary>Start with Pi's thinking level for this chat: off, minimal, low, medium, high, xhigh, max,
+        /// or empty for the default. Added last so the earlier slots of this dual interface stay in place.</summary>
+        void StartWithThinking(string workbookName, string prompt, string provider, string model, string thinking);
     }
 
     // StandardOleMarshalObject delivers calls from other processes on Excel's UI thread.
@@ -36,7 +39,12 @@ namespace Aperture.Excel
 
         public void Start(string workbookName, string prompt, string provider, string model)
         {
-            try { addIn.StartScripted(workbookName, prompt, provider, model); }
+            StartWithThinking(workbookName, prompt, provider, model, "");
+        }
+
+        public void StartWithThinking(string workbookName, string prompt, string provider, string model, string thinking)
+        {
+            try { addIn.StartScripted(workbookName, prompt, provider, model, thinking); }
             catch (Exception ex)
             {
                 Diagnostics.Write("scripted_start_refused", ex.GetType().Name);

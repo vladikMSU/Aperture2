@@ -351,9 +351,12 @@ def main() -> int:
         assert info["paneCount"] == 0, "A pane opened by itself before Start"
         idle = excel.state()
         checks["stateBeforeStart"] = idle
-        assert idle == {"state": "idle", "log_path": None, "error": None}, idle
+        assert idle == {"state": "idle", "log_path": None, "error": None, "thinking": None}, idle
         checks["refusedUnknownBook"] = expect_refusal(
             lambda: excel.automation.Start("нет-такой-книги.xlsx", PROMPT, args.provider, args.model), "не открыта")
+        checks["refusedUnknownThinking"] = expect_refusal(
+            lambda: excel.automation.StartWithThinking(str(excel.book.Name), PROMPT, args.provider, args.model, "extreme"), "Допустимы")
+        assert excel.info()["paneCount"] == 0, "A refused Start opened a pane"
 
         # Run 1: a real request that edits the book.
         book_name = str(excel.book.Name)

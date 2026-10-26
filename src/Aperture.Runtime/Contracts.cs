@@ -30,9 +30,14 @@ namespace Aperture.Runtime
         public string PythonPath { get; set; }
         public string Provider { get; set; }
         public string Model { get; set; }
+        /// <summary>Pi's --thinking level for this chat; empty keeps Pi's default. Pi clamps it to the model.</summary>
+        public string Thinking { get; set; }
         public string StateRoot { get; set; }
         public bool EnableExcelTools { get; set; } = true;
         public int CommandTimeoutSeconds { get; set; } = 45;
+
+        /// <summary>The levels of the pinned Pi's --thinking (docs/cli.md, docs/settings.md).</summary>
+        public static readonly string[] ThinkingLevels = { "off", "minimal", "low", "medium", "high", "xhigh", "max" };
     }
 
     public sealed class PiEvent : EventArgs

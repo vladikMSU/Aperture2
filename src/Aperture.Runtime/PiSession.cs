@@ -33,6 +33,8 @@ namespace Aperture.Runtime
         public string SessionDirectory { get; }
         /// <summary>Pi's JSONL history of this chat, reported by get_state. Pi creates the file with the first message.</summary>
         public string SessionFile { get; private set; }
+        /// <summary>The thinking level Pi uses after startup (get_state), already clamped to the model.</summary>
+        public string ThinkingLevel { get; private set; }
         /// <summary>SHA-256 of the system prompt shared by all chats, without the per-chat binding line.</summary>
         public static string SystemPromptSha256 => SessionConfiguration.SystemPromptSha256;
         public int ProcessId => process.Id;
@@ -109,6 +111,7 @@ namespace Aperture.Runtime
                 await session.input.WriteAsync("\n").ConfigureAwait(false); // release process gate only after job assignment
                 var state = await session.GetStateAsync(cancellationToken).ConfigureAwait(false);
                 session.SessionFile = (string)state["data"]?["sessionFile"];
+                session.ThinkingLevel = (string)state["data"]?["thinkingLevel"];
                 if (expectedSessionFile != null && (session.SessionFile == null ||
                     !string.Equals(Path.GetFullPath(session.SessionFile), expectedSessionFile, StringComparison.OrdinalIgnoreCase)))
                     throw new InvalidOperationException("Pi opened another history than the chat's " + expectedSessionFile + ".");

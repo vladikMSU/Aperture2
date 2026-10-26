@@ -120,10 +120,10 @@ namespace Aperture.Excel
             await SubmitAsync(text.Trim(), ++operationVersion, false);
         }
 
-        // The automation's Start, on Excel's UI thread: a new chat with the script's provider and
-        // model, then the prompt as if typed. Refusals throw before anything starts; the request
-        // itself runs asynchronously and reports to run.
-        internal void StartScripted(string text, string provider, string model, ScriptedRun run)
+        // The automation's Start, on Excel's UI thread: a new chat with the script's provider, model
+        // and thinking level, then the prompt as if typed. Refusals throw before anything starts; the
+        // request itself runs asynchronously and reports to run.
+        internal void StartScripted(string text, string provider, string model, string thinking, ScriptedRun run)
         {
             if (disposed) throw new InvalidOperationException("Панель Aperture2 этой книги закрыта.");
             if (busy) throw new InvalidOperationException("Чат этой книги занят: дождитесь конца запроса или остановите его.");
@@ -131,7 +131,8 @@ namespace Aperture.Excel
             if (BindingValidationError() != null) { binding = null; binding = captureWorkbook(); }
             Admit();
             scriptedRun = run;
-            chatSettings = String.IsNullOrWhiteSpace(provider) && String.IsNullOrWhiteSpace(model) ? null : settings.WithModel(provider, model);
+            chatSettings = String.IsNullOrWhiteSpace(provider) && String.IsNullOrWhiteSpace(model) && String.IsNullOrWhiteSpace(thinking)
+                ? null : settings.ForChat(provider, model, thinking);
             resumeHistory = null;
             runError = null;
             runStopped = false;
@@ -241,7 +242,7 @@ namespace Aperture.Excel
                             diagnostics.Clear();
                             session.EventReceived += SessionEvent;
                             session.StandardError += SessionDiagnostic;
-                            if (scriptedRun != null) scriptedRun.LogPath = session.SessionFile;
+                            if (scriptedRun != null) { scriptedRun.LogPath = session.SessionFile; scriptedRun.Thinking = session.ThinkingLevel; }
                             installed = true;
                             Diagnostics.Write(resumeFile != null ? "pi_session_resumed" : "pi_session_started");
                         });

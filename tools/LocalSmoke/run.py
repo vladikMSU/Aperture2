@@ -23,6 +23,7 @@ import uuid
 import zipfile
 
 import pythoncom
+import pywintypes
 import win32api
 import win32com.client
 import win32event
@@ -75,10 +76,13 @@ def pane_identities(status: dict) -> dict:
 OPEN_PANE_PROMPT = "Ответь одним словом: готово."
 
 
-def open_pane_without_request(automation, book_name: str) -> dict:
+def open_pane_without_request(automation, book_name: str, thinking: str | None = None) -> dict:
     """Start creates and shows the book's pane and begins starting Pi; Cancel right away stops that
     startup before the prompt is sent. Pi writes its history file only with the first message."""
-    automation.Start(book_name, OPEN_PANE_PROMPT, "", "")
+    if thinking is None:
+        automation.Start(book_name, OPEN_PANE_PROMPT, "", "")
+    else:
+        automation.StartWithThinking(book_name, OPEN_PANE_PROMPT, "", "", thinking)
     automation.Cancel()
     deadline = time.monotonic() + 30
     state = json.loads(str(automation.GetState()))
@@ -300,7 +304,16 @@ def main() -> int:
             report["checks"]["noPaneWithoutRequest"] = {"windowsActivated": 4, "paneCount": 0}
             # Open both panes as a script would, without a model request, then observe three
             # full 1.5-second cleanup ticks. Recreating panes silently loses chat.
-            opened = [open_pane_without_request(automation, str(book.Name)) for book in (workbook, control_workbook)]
+            try:
+                automation.StartWithThinking(str(workbook.Name), OPEN_PANE_PROMPT, "", "", "extreme")
+                raise AssertionError("An unknown thinking level was accepted")
+            except pywintypes.com_error as error:
+                refusal = str(error.excepinfo[2] if error.excepinfo else error)
+                assert "Допустимы" in refusal, refusal
+            assert json.loads(str(automation.GetInfo()))["paneCount"] == 0, "A refused start opened a pane"
+            report["checks"]["refusedUnknownThinking"] = refusal
+            opened = [open_pane_without_request(automation, str(workbook.Name)),
+                      open_pane_without_request(automation, str(control_workbook.Name), "high")]
             report["checks"]["panesOpenedByStartWithoutRequest"] = opened
             expected_hwnds = {target["workbookHwnd"], control_hwnd}
             snapshots = [wait_views(automation, expected_hwnds)]

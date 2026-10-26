@@ -8,6 +8,8 @@ namespace Aperture.Excel
     {
         internal string State { get; private set; } = "running";
         internal string LogPath { get; set; }
+        // The level Pi uses for this chat after startup (get_state), null before that.
+        internal string Thinking { get; set; }
         internal string Error { get; private set; }
 
         // status is the pane's own end of a request: done, stopped or error.

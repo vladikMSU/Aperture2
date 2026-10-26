@@ -520,7 +520,7 @@ internal static class PaneLifecycleHarness
 
     private static async Task<PiSession> StartScriptedAsync(ChatPaneControl pane, ScriptedRun run)
     {
-        pane.StartScripted("  scripted audit  ", "routerai", "deepseek/test", run);
+        pane.StartScripted("  scripted audit  ", "routerai", "deepseek/test", "high", run);
         var running = new PiSession();
         await Task.Run(() => PiSession.StartGate.SetResult(running));
         await UntilAsync(pane, () => PiSession.Prompts == 1, "The scripted prompt was not sent.");
@@ -538,10 +538,10 @@ internal static class PaneLifecycleHarness
             Set(pane, "session", old);
             view.AppendMessage("Вы", "earlier question");
             var run = new ScriptedRun();
-            pane.StartScripted("  scripted audit  ", "routerai", "deepseek/test", run);
+            pane.StartScripted("  scripted audit  ", "routerai", "deepseek/test", "high", run);
             Check(Field<bool>(pane, "busy") && view.Scripted && run.State == "running", "Start did not take the chat synchronously.");
             var refused = false;
-            try { pane.StartScripted("second", null, null, new ScriptedRun()); }
+            try { pane.StartScripted("second", null, null, null, new ScriptedRun()); }
             catch (InvalidOperationException) { refused = true; }
             Check(refused, "A busy chat accepted a second scripted Start.");
             var running = new PiSession();
@@ -549,10 +549,12 @@ internal static class PaneLifecycleHarness
             await UntilAsync(pane, () => PiSession.Prompts == 1, "The scripted prompt was not sent.");
             Check(old.Disposed, "Start did not end the previous chat session.");
             var options = (PaneSettings)PiSession.LastOptions;
-            Check(options.Provider == "routerai" && options.Model == "deepseek/test", "The script's provider and model did not reach Pi.");
+            Check(options.Provider == "routerai" && options.Model == "deepseek/test" && options.Thinking == "high",
+                "The script's provider, model and thinking level did not reach Pi.");
             Check(view.Transcript.Count == 1 && view.Transcript[0] == "Вы: scripted audit", "Start did not open a new chat with the typed prompt.");
             Check(!view.PromptCleared, "Start cleared a draft typed in the pane.");
             Check(run.LogPath == "history.jsonl", "The chat's Pi history path was not reported.");
+            Check(run.Thinking == "high", "The level Pi reported after startup was not kept for GetState.");
             await EmitAsync(pane, running, "{type:'agent_settled',aborted:false}");
             Check(run.State == "done" && run.Error == null && !view.Scripted && !Field<bool>(pane, "busy"),
                 "A settled scripted request was not reported as done.");
@@ -564,7 +566,30 @@ internal static class PaneLifecycleHarness
             ResetFake();
             await CallWithoutContext(pane, "ResetChatAsync");
             await StartSessionAsync(pane);
-            Check(((PaneSettings)PiSession.LastOptions).Provider == null, "The script's model outlived its chat.");
+            Check(((PaneSettings)PiSession.LastOptions).Provider == null && ((PaneSettings)PiSession.LastOptions).Thinking == null,
+                "The script's model or thinking level outlived its chat.");
+        }
+
+        Console.WriteLine("CASE: a thinking level alone keeps the saved model; the chat keeps its level when the renamed book resumes.");
+        ResetFake();
+        using (var pane = CreatePane())
+        {
+            var run = new ScriptedRun();
+            Check(run.Thinking == null, "A run reported a thinking level before Pi started.");
+            pane.StartScripted("audit", "", "", "max", run);
+            var first = new PiSession { ThinkingLevel = "max" };
+            await Task.Run(() => PiSession.StartGate.SetResult(first));
+            await UntilAsync(pane, () => PiSession.Prompts == 1, "The scripted prompt was not sent.");
+            var options = (PaneSettings)PiSession.LastOptions;
+            Check(options.Provider == null && options.Model == null && options.Thinking == "max" && run.Thinking == "max",
+                "A thinking level without provider and model did not keep the saved model.");
+            await EmitAsync(pane, first, "{type:'agent_settled',aborted:false}");
+            Field<WorkbookBinding>(pane, "binding").RenamedTo = "Модель.xlsx";
+            ResetFake();
+            var send = CallWithoutContext(pane, "SendAsync");
+            Check(PiSession.Resumes == 1 && ((PaneSettings)PiSession.LastOptions).Thinking == "max", "The resumed chat lost its thinking level.");
+            await Task.Run(() => PiSession.StartGate.SetResult(new PiSession { ThinkingLevel = "max" }));
+            await send;
         }
 
         Console.WriteLine("CASE: automation Start refused while another window runs; startup failure reports failed.");
@@ -573,14 +598,14 @@ internal static class PaneLifecycleHarness
         {
             CreateHandles(pane);
             var refused = false;
-            try { pane.StartScripted("audit", null, null, new ScriptedRun()); }
+            try { pane.StartScripted("audit", null, null, null, new ScriptedRun()); }
             catch (InvalidOperationException) { refused = true; }
             Check(refused && !Field<bool>(pane, "busy") && !View(pane).Scripted, "Start ran while another window held the turn.");
         }
         using (var pane = CreatePane())
         {
             var run = new ScriptedRun();
-            pane.StartScripted("audit", null, null, run);
+            pane.StartScripted("audit", null, null, null, run);
             await Task.Run(() => PiSession.StartGate.SetException(new InvalidOperationException("test startup failure")));
             await UntilAsync(pane, () => run.State != "running", "A failed scripted startup stayed running.");
             Check(run.State == "failed" && run.Error == "test startup failure" && !View(pane).Scripted, "Startup failure was not reported as failed.");
@@ -632,7 +657,7 @@ internal static class PaneLifecycleHarness
         using (var pane = CreatePaneWithoutWindow())
         {
             var run = new ScriptedRun();
-            pane.StartScripted("audit", null, null, run);
+            pane.StartScripted("audit", null, null, null, run);
             Check(!pane.IsHandleCreated && run.State == "running" && Field<bool>(pane, "busy") && PiSession.Starts == 0,
                 "Start did not admit the request while the new pane had no window.");
             CreateHandles(pane);
@@ -645,7 +670,7 @@ internal static class PaneLifecycleHarness
         using (var pane = CreatePaneWithoutWindow())
         {
             var run = new ScriptedRun();
-            pane.StartScripted("audit", null, null, run);
+            pane.StartScripted("audit", null, null, null, run);
             pane.Stop();
             Check(run.State == "cancelled" && !Field<bool>(pane, "busy") && !View(pane).Scripted, "Cancel while the pane opened did not end the request.");
             CreateHandles(pane);
@@ -661,7 +686,7 @@ internal static class PaneLifecycleHarness
             using (var pane = CreatePaneWithoutWindow())
             {
                 var run = new ScriptedRun();
-                pane.StartScripted("audit", null, null, run);
+                pane.StartScripted("audit", null, null, null, run);
                 // The pane never gets its window; its timer runs on this thread's message loop.
                 var deadline = DateTime.UtcNow.AddSeconds(5);
                 while (run.State == "running" && DateTime.UtcNow < deadline) await Task.Delay(20);
@@ -756,7 +781,7 @@ internal static class PaneLifecycleHarness
             Field<WorkbookBinding>(pane, "binding").RenamedTo = "Модель.xlsx";
             ResetFake();
             var run = new ScriptedRun();
-            pane.StartScripted("audit", null, null, run);
+            pane.StartScripted("audit", null, null, null, run);
             await Task.Run(() => PiSession.StartGate.SetResult(new PiSession()));
             await UntilAsync(pane, () => PiSession.Prompts == 1, "The scripted prompt was not sent.");
             Check(PiSession.Starts == 1 && PiSession.Resumes == 0 && pane.BoundWorkbookId != workbookId,

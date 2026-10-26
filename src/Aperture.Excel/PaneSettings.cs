@@ -13,6 +13,8 @@ namespace Aperture.Excel
         public string PythonPath { get; set; }
         public string Provider { get; set; }
         public string Model { get; set; }
+        // A script's thinking level for one chat; never part of settings.json.
+        [JsonIgnore] public string Thinking { get; set; }
 
         internal static string SettingsPath
         {
@@ -42,12 +44,17 @@ namespace Aperture.Excel
             File.WriteAllText(SettingsPath, JsonConvert.SerializeObject(this, Formatting.Indented));
         }
 
-        // Another provider and model for one chat; the copy is never saved.
-        internal PaneSettings WithModel(string provider, string model)
+        // A script's provider and model (both empty: the saved ones) and thinking level for one chat;
+        // the copy is never saved.
+        internal PaneSettings ForChat(string provider, string model, string thinking)
         {
             var copy = (PaneSettings)MemberwiseClone();
-            copy.Provider = provider;
-            copy.Model = model;
+            if (!String.IsNullOrWhiteSpace(provider) || !String.IsNullOrWhiteSpace(model))
+            {
+                copy.Provider = provider;
+                copy.Model = model;
+            }
+            copy.Thinking = thinking;
             return copy;
         }
 
@@ -59,7 +66,8 @@ namespace Aperture.Excel
                 NodePath = NullIfEmpty(NodePath),
                 PythonPath = NullIfEmpty(PythonPath),
                 Provider = NullIfEmpty(Provider),
-                Model = NullIfEmpty(Model)
+                Model = NullIfEmpty(Model),
+                Thinking = NullIfEmpty(Thinking)
             };
         }
 

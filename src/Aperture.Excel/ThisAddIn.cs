@@ -163,16 +163,21 @@ namespace Aperture.Excel
         // Automation calls arrive on Excel's UI thread (AgentAutomation is a StandardOleMarshalObject).
         // The book's pane is created on its first Start, like on its first button press, and shown;
         // the chat sends the prompt once the pane has its window and Start returns at once.
-        internal void StartScripted(string workbookName, string prompt, string provider, string model)
+        internal void StartScripted(string workbookName, string prompt, string provider, string model, string thinking)
         {
             if (String.IsNullOrWhiteSpace(prompt)) throw new ArgumentException("Пустой промпт.");
             if (!String.IsNullOrWhiteSpace(provider) && String.IsNullOrWhiteSpace(model))
                 throw new ArgumentException("Вместе с провайдером нужна модель.");
+            // Pi's own levels; empty keeps Pi's default for the model. Checked before any pane opens.
+            var level = (thinking ?? "").Trim().ToLowerInvariant();
+            if (level.Length != 0 && Array.IndexOf(PiSessionOptions.ThinkingLevels, level) < 0)
+                throw new ArgumentException("Неизвестный уровень рассуждения «" + thinking + "». Допустимы: " +
+                    String.Join(", ", PiSessionOptions.ThinkingLevels) + " или пустая строка (уровень по умолчанию).");
             var window = FindWorkbookWindow(workbookName);
             var entry = EnsurePane(window);
             entry.Pane.Visible = true;
             var run = new ScriptedRun();
-            entry.Control.StartScripted(prompt, provider?.Trim(), model?.Trim(), run);
+            entry.Control.StartScripted(prompt, provider?.Trim(), model?.Trim(), level.Length == 0 ? null : level, run);
             scriptedRun = run;
             scriptedWindow = window.Hwnd;
             Diagnostics.Write("scripted_start", "window=" + scriptedWindow);
@@ -197,7 +202,8 @@ namespace Aperture.Excel
             {
                 state = scriptedRun == null ? "idle" : scriptedRun.State,
                 log_path = scriptedRun?.LogPath,
-                error = scriptedRun?.Error
+                error = scriptedRun?.Error,
+                thinking = scriptedRun?.Thinking // Pi's effective level after startup, null before it
             });
         }
 

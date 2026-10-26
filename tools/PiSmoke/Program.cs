@@ -239,9 +239,19 @@ internal static class Program
             Arguments = SessionConfiguration.Quote(Path.Combine(root, "src", "Aperture.Runtime", "pi-launcher.mjs")) + " " +
                 SessionConfiguration.Quote(Path.Combine(root, "tests", "runtime", "protocol-fixture.mjs"))
         };
+        // A chat's thinking level reaches Pi as --thinking; an unknown level is refused before Pi starts.
+        var thinking = SessionConfiguration.Create(new PiSessionOptions { RepositoryRoot = root, StateRoot = directory, EnableExcelTools = false, Thinking = "xhigh" }, null);
+        Require(thinking.Arguments.Contains("\"--thinking\" \"xhigh\""), "The thinking level did not reach Pi's arguments.");
+        Require(!SessionConfiguration.Create(new PiSessionOptions { RepositoryRoot = root, StateRoot = directory, EnableExcelTools = false }, null)
+            .Arguments.Contains("--thinking"), "An empty thinking level was passed to Pi.");
+        bool unknownLevel = false;
+        try { SessionConfiguration.Create(new PiSessionOptions { RepositoryRoot = root, StateRoot = directory, EnableExcelTools = false, Thinking = "extreme" }, null); }
+        catch (ArgumentException) { unknownLevel = true; }
+        Require(unknownLevel, "An unknown thinking level was accepted.");
         int childPid;
         using (var session = await PiSession.StartPreparedAsync(config, 1))
         {
+            Require(session.ThinkingLevel == "high", "The effective thinking level from get_state was not kept.");
             JObject initial = await session.GetStateAsync();
             childPid = (int)initial["data"]["childPid"];
             Task<JObject> slow = session.SendCommandAsync(new JObject { ["type"] = "get_state", ["tag"] = "slow", ["delay"] = 70 });
@@ -264,7 +274,7 @@ internal static class Program
         }
         for (int i = 0; i < 30 && ProcessExists(childPid); i++) await Task.Delay(100);
         Require(!ProcessExists(childPid), "Owned child survived the Windows job cleanup.");
-        Console.WriteLine("{\"ok\":true,\"checks\":[\"response_correlation\",\"fragmented_utf8_unicode\",\"rpc_rejection\",\"timeout_then_recovery\",\"child_process_cleanup\"]}");
+        Console.WriteLine("{\"ok\":true,\"checks\":[\"thinking_argument\",\"effective_thinking_level\",\"response_correlation\",\"fragmented_utf8_unicode\",\"rpc_rejection\",\"timeout_then_recovery\",\"child_process_cleanup\"]}");
     }
 
     private static bool ProcessExists(int pid)

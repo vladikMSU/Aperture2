@@ -84,32 +84,16 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 }
 
 /* ------------------------------------------------------------ header */
+/* Excel's task pane title already names Aperture2: the header is only the chat actions, on the right,
+   as tall as their 28 px buttons need. */
 .header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 44px;
-  padding: 0 8px 0 14px;
+  justify-content: flex-end;
+  height: 36px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--line);
   flex: none;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex: 1;
-  min-width: 0;
-  color: var(--text-2);
-  font-weight: 600;
-  letter-spacing: .01em;
-}
-
-.brand-icon {
-  width: 16px;
-  height: 16px;
-  flex: none;
-  color: var(--accent);
 }
 
 .toolbar {

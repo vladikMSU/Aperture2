@@ -61,7 +61,8 @@ function check(actual, expected, message) {
     check(await page.evaluate(() => window.apertureSent[0].command), 'ready', 'The page must announce readiness to the host.');
     check(await page.locator('#workbook-name, #rebind').count(), 0, 'The header must not name the workbook or offer rebinding.');
     check(await page.locator('.toolbar button').evaluateAll(nodes => nodes.map(node => node.id)), ['new-chat', 'settings'], 'The header keeps only New chat and Settings.');
-    check((await page.locator('.header .brand').textContent()).trim(), 'Aperture', 'The header shows the product mark on the left.');
+    check(await page.locator('.header').evaluate(node => Array.from(node.children).map(child => child.className)), ['toolbar'], 'The header holds only the chat actions: Excel titles the pane.');
+    check((await page.locator('.header').textContent()).trim(), '', 'The header shows no product name or other text.');
     check(await page.locator('#status, #status-text, .status-dot').count(), 0, 'The composer has no status line.');
     check(await page.locator('.composer-bar').evaluate(node => Array.from(node.children).map(child => child.id)), ['stop', 'send'], 'The composer bar holds only Stop/Send.');
     check(await promptScroll(), { overflowY: 'hidden', scrolls: false }, 'An empty one-line prompt must have no scrollbar arrows.');
@@ -335,8 +336,16 @@ function check(actual, expected, message) {
     // ---------------------------------------------------------------- layout
     for (const width of [320, 410, 760]) {
       await page.setViewportSize({ width, height: 850 });
-      const height = await page.locator('.header').evaluate(node => node.getBoundingClientRect().height);
-      check(height >= 40 && height <= 50, true, 'Header must stay one compact row at width ' + width + '.');
+      const header = await page.locator('.header').evaluate(node => {
+        const box = node.getBoundingClientRect();
+        const buttons = Array.from(node.querySelectorAll('button')).map(button => button.getBoundingClientRect());
+        return { height: box.height, right: box.right - Math.max(...buttons.map(button => button.right)),
+          left: Math.min(...buttons.map(button => button.left)) - box.left,
+          hit: buttons.every(button => button.width >= 28 && button.height >= 28 && button.top >= box.top && button.bottom <= box.bottom) };
+      });
+      check(header.height >= 32 && header.height <= 38, true, 'Header must stay one row no taller than its buttons need at width ' + width + '.');
+      check(header.hit, true, 'Header buttons must keep a 28 px hit area inside the header at width ' + width + '.');
+      check(header.right <= 12 && header.left > header.right, true, 'Header buttons must sit at the right edge at width ' + width + '.');
       check(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'Pane must fit width ' + width + '.');
     }
     await page.setViewportSize({ width: 320, height: 650 });
@@ -346,6 +355,8 @@ function check(actual, expected, message) {
     await page.emulateMedia({ colorScheme: 'light' });
     const lightBackground = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
     check(lightBackground !== 'rgb(28, 29, 32)', true, 'Light Office/Windows theme must switch the palette.');
+    check(await page.locator('.toolbar button').evaluateAll(nodes => nodes.map(node => node.checkVisibility() && getComputedStyle(node).color !== getComputedStyle(document.body).backgroundColor)),
+      [true, true], 'New chat and Settings must stay visible in the light theme.');
     await page.screenshot({ path: path.join(output, screenshots[5]) });
     await page.emulateMedia({ colorScheme: 'dark' });
 

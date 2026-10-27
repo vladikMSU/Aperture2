@@ -490,6 +490,18 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 .step.host-notice .step-icon { margin-top: 2px; }
 .step.host-notice .notice-detail { font-size: 11.5px; }
 
+/* Provider retries: the whole label wraps instead of being cut; a sent retry becomes a muted record. */
+.retry-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.step.notice.retry[data-state="done"], .step.notice.retry[data-state="done"] .step-icon,
+.step.notice.retry[data-state="stopped"], .step.notice.retry[data-state="stopped"] .step-icon { color: var(--text-3); }
+.step.notice.retry[data-state="done"] .step-state { display: none; }
+.step.notice.retry[data-state="error"], .step.notice.retry[data-state="error"] .step-icon { color: var(--danger); }
+
+/* The partial reasoning or text of an attempt whose stream broke off. */
+.step.reasoning.interrupted .step-label { text-decoration: line-through; }
+.step.reasoning.interrupted .step-label, .step.reasoning.interrupted .step-context { color: var(--text-3); }
+.step.text.interrupted { color: var(--text-3); }
+
 .step.error {
   display: flex;
   align-items: flex-start;
@@ -502,6 +514,10 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 }
 
 .step.error .step-icon { margin-top: 3px; color: var(--danger); }
+.step.error .notice-detail { font-size: 11.5px; }
+/* A provider error Pi may still recover from is a warning until the request ends with it. */
+.step.provider-error:not([data-outcome="failed"]) { background: var(--warning-soft); }
+.step.provider-error:not([data-outcome="failed"]) .step-icon { color: var(--warning); }
 
 .spinner {
   display: inline-block;

@@ -343,7 +343,8 @@
     const run = {
       node, header, title, meta, body, footer, tools: new Map(), models: [], model: null, lastGroup: null,
       startedAt: Date.now(), finishedAt: 0, finished: false, status: 'running', current: 'Начинаю работу',
-      modelNames: [], outputTokens: 0, streamMs: 0, pendingSequence: 0, notices: new Set(), compactions: []
+      modelNames: [], outputTokens: 0, streamMs: 0, pendingSequence: 0, notices: new Set(), compactions: [],
+      providerErrors: [], retry: null
     };
     header.addEventListener('click', () => {
       const collapsed = !node.classList.contains('collapsed');
@@ -433,6 +434,7 @@
   // Model messages: each content part (reasoning, text, tool call) is a step at its own position.
   function startModel(message) {
     const run = ensureRun();
+    endRetry(run, 'done'); // the wait is over: the request is sent again
     const model = { parts: new Map(), blankText: new Map(), startedAt: Date.now() };
     run.models.push(model); run.model = model;
     if (message) noteModel(run, message);
@@ -683,22 +685,75 @@
       node.append(icon('stop', 'step-icon'), element('span', 'step-label', 'Ответ остановлен'));
       place(run, node, 'notice');
     } else if (message.errorMessage || message.stopReason === 'error') {
-      const node = element('div', 'step error');
-      node.append(icon('alert', 'step-icon'), element('span', '', message.errorMessage || 'Провайдер вернул ошибку.'));
-      place(run, node, 'error');
-    }
+      model.parts.forEach(part => { if (part.kind === 'reasoning' || part.kind === 'text') interrupt(part); });
+      providerError(run, message.errorMessage);
+    } else settleErrors(run, 'pending', 'recovered');
     run.model = null;
     if (!run.finished) setCurrent(run, 'Думаю');
   }
-  function retryNotice(event, start) {
+  // Provider errors. Transport failures that Pi retries (the network part of its retryable patterns) get a
+  // plain title with the raw text below; load, limit and other provider errors keep their own text.
+  const CONNECTION_LOST = /terminated|network.?error|connection.?(?:error|lost|reset)|other side closed|fetch failed|socket hang up|socket connection was closed|websocket.?(?:closed|error)|ended without|stream ended before|http2 request did not get a response|pending stream has been canceled|ECONNRESET/i;
+  const NO_CONNECTION = /connection.?refused|ECONNREFUSED|getaddrinfo|ENOTFOUND|EAI_AGAIN|upstream.?connect|reset before headers/i;
+  function providerError(run, raw) {
+    const text = raw || 'Провайдер вернул ошибку.';
+    const title = CONNECTION_LOST.test(text) ? 'Обрыв соединения с провайдером' : NO_CONNECTION.test(text) ? 'Нет соединения с провайдером' : null;
+    const node = element('div', 'step error provider-error');
+    node.append(icon('alert', 'step-icon'), title ? noticeCopy(title, text) : element('span', '', text));
+    place(run, node, 'error');
+    const plate = { node };
+    run.providerErrors.push(plate);
+    setOutcome(plate, 'pending');
+  }
+  // A failure Pi may still recover from is a warning; it turns red only when the request ends with it.
+  function setOutcome(plate, outcome) { plate.outcome = outcome; plate.node.dataset.outcome = outcome; }
+  function settleErrors(run, from, to) { run.providerErrors.forEach(plate => { if (plate.outcome === from) setOutcome(plate, to); }); }
+  function delayText(ms) {
+    if (ms < 10000 && ms % 1000) return (Math.max(100, ms) / 1000).toFixed(1).replace('.', ',') + ' с';
+    const total = Math.round(ms / 1000);
+    return total < 60 ? total + ' с' : Math.floor(total / 60) + ' мин' + (total % 60 ? ' ' + (total % 60) + ' с' : '');
+  }
+  // One row per retry: a spinner while Pi waits, then a muted record once the request is sent again.
+  function retryStarted(event) {
     const run = ensureRun();
-    const node = element('div', 'step notice');
-    const text = start
-      ? 'Повтор запроса к провайдеру' + (event.attempt ? ' · попытка ' + event.attempt + (event.maxAttempts ? ' из ' + event.maxAttempts : '') : '') + (event.errorMessage ? ' · ' + event.errorMessage : '')
-      : 'Повтор не удался' + (event.finalError ? ' · ' + event.finalError : '');
-    node.append(icon('retry', 'step-icon'), element('span', 'step-label', text));
-    place(run, node, start ? 'notice' : 'error');
-    setCurrent(run, start ? 'Повтор запроса к провайдеру' : 'Повтор не удался');
+    endRetry(run, 'done');
+    settleErrors(run, 'pending', 'retried');
+    const label = 'Повтор ' + (event.attempt || '?') + (event.maxAttempts ? ' из ' + event.maxAttempts : '') +
+      (Number.isFinite(event.delayMs) ? ' через ' + delayText(event.delayMs) : '');
+    const node = element('div', 'step notice retry');
+    const item = { node, labelNode: element('span', 'retry-label', label), meta: element('span', 'step-meta'), stateNode: element('span', 'step-state') };
+    node.append(icon('retry', 'step-icon'), item.labelNode, item.meta, item.stateNode);
+    place(run, node, 'notice');
+    setState(item, 'running');
+    run.retry = item;
+    setCurrent(run, label);
+  }
+  function endRetry(run, state, meta) {
+    if (!run.retry) return;
+    setState(run.retry, state);
+    if (meta) run.retry.meta.textContent = meta;
+    run.retry = null;
+  }
+  function retryEnded(event) {
+    const run = ensureRun();
+    if (event.success !== false) { endRetry(run, 'done'); settleErrors(run, 'pending', 'recovered'); return; }
+    if (event.finalError === 'Retry cancelled') { endRetry(run, 'stopped', 'отменён'); return; }
+    // The last attempt failed too: its error is final. The earlier ones stay warnings that were retried.
+    endRetry(run, 'done');
+    settleErrors(run, 'pending', 'failed');
+    const node = element('div', 'step notice retry');
+    const item = { node, stateNode: element('span', 'step-state') };
+    node.append(icon('retry', 'step-icon'), element('span', 'retry-label', 'Повторы не помогли' + (event.attempt ? ' · ' + plural(event.attempt, ['повтор', 'повтора', 'повторов']) : '')), item.stateNode);
+    place(run, node, 'notice');
+    setState(item, 'error');
+    setCurrent(run, 'Повторы не помогли');
+  }
+  // The stream of a failed attempt broke off: its partial reasoning and text are not the agent's result.
+  function interrupt(part) {
+    part.node.classList.add('interrupted');
+    if (part.kind !== 'reasoning') return;
+    part.meta.textContent = 'прервано';
+    setState(part, 'stopped');
   }
 
   // Context compaction: Pi runs it before the prompt, between turns or after agent_end, always
@@ -836,14 +891,18 @@
       item.meta.textContent = seconds(Date.now() - item.startedAt);
       setState(item, 'unknown');
     });
+    endRetry(run, 'stopped');
+    // An error nothing recovered from is final, unless the user stopped the request.
+    if (status !== 'stopped') settleErrors(run, 'pending', 'failed');
     flushMarkdown();
     run.body.querySelectorAll(':scope > .final').forEach(node => node.classList.remove('final'));
     let last = run.body.lastElementChild;
     // A compaction after agent_end follows the answer but does not replace it as the final one.
     while (last && last.classList.contains('trace') && Array.from(last.children).every(step => step.classList.contains('compaction'))) last = last.previousElementSibling;
-    if (last && last.classList.contains('text')) last.classList.add('final');
+    const final = last && last.classList.contains('text') && !last.classList.contains('interrupted') ? last : null;
+    if (final) final.classList.add('final');
     updateRun(run);
-    renderFooter(run, last && last.classList.contains('text') ? last : null);
+    renderFooter(run, final);
   }
   function renderFooter(run, finalNode) {
     const facts = [];
@@ -909,8 +968,8 @@
       }
       case 'message_end': finishModel(event.message); break;
       case 'tool_execution_start': case 'tool_execution_update': case 'tool_execution_end': toolEvent(event); break;
-      case 'auto_retry_start': retryNotice(event, true); break;
-      case 'auto_retry_end': if (event.success === false) retryNotice(event, false); break;
+      case 'auto_retry_start': retryStarted(event); break;
+      case 'auto_retry_end': retryEnded(event); break;
       case 'compaction_start': startCompaction(event); break;
       case 'summarization_retry_scheduled': compactionRetry(event); break;
       case 'compaction_end': endCompaction(event); break;

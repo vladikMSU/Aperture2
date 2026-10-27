@@ -11,7 +11,7 @@ const output = path.join(root, 'work');
 const screenshots = ['chat-webview-welcome.png', 'chat-webview-conversation.png', 'chat-webview-streaming.png',
   'chat-webview-collapsed.png', 'chat-webview-narrow.png', 'chat-webview-light.png', 'chat-webview-all-tools.png',
   'chat-webview-composer-idle.png', 'chat-webview-composer-busy.png', 'chat-webview-composer-error.png',
-  'chat-webview-compaction-running.png', 'chat-webview-compaction.png'];
+  'chat-webview-compaction-running.png', 'chat-webview-compaction.png', 'chat-webview-retry-waiting.png', 'chat-webview-retry.png'];
 let checks = 0;
 function check(actual, expected, message) {
   assert.deepStrictEqual(actual, expected, message);
@@ -441,6 +441,108 @@ function check(actual, expected, message) {
     await activity({ type: 'compaction_end', reason: 'threshold', result: { summary: 's', firstKeptEntryId: 'e', tokensBefore: 99000 }, aborted: false, willRetry: false });
     check(await compaction().locator('.step-label').textContent(), 'Контекст сжат', 'A late compaction_end still updates the same row.');
     check(await run().locator('.step.compaction').count(), 1, 'A late compaction_end must not add a row.');
+
+    // ---------------------------------------------------------------- dropped connections and retries
+    await receive({ type: 'clear_transcript' });
+    const plate = (index = 0) => run().locator('.step.provider-error').nth(index);
+    const retryRow = (index = 0) => run().locator('.step.retry').nth(index);
+    const background = locator => locator.evaluate(node => getComputedStyle(node).backgroundColor);
+    const token = name => page.evaluate(name => {
+      const probe = document.createElement('div'); probe.style.background = 'var(' + name + ')'; document.body.appendChild(probe);
+      const color = getComputedStyle(probe).backgroundColor; probe.remove(); return color;
+    }, name);
+    const timeline = () => run().locator('.run-body > *').evaluateAll(nodes => nodes.map(node => node.classList.contains('trace')
+      ? 'trace:' + Array.from(node.children).map(step => ['retry', 'reasoning', 'tool', 'compaction'].find(kind => step.classList.contains(kind)) || 'other').join(',')
+      : node.classList.contains('provider-error') ? 'error' : node.classList.contains('text') ? 'text' : 'other'));
+    // Synthetic attempt: the stream breaks off while the model reasons; Pi retries it.
+    const droppedAttempt = async (thinking, errorMessage) => {
+      await activity({ type: 'turn_start' });
+      await activity({ type: 'message_start', message: modelMessage() });
+      await update({ type: 'thinking_delta', contentIndex: 0, delta: thinking });
+      await activity({ type: 'message_end', message: { ...modelMessage([{ type: 'thinking', thinking }], 'error'), errorMessage } });
+      await activity({ type: 'turn_end' });
+      await activity({ type: 'agent_end', willRetry: true });
+    };
+    await receive({ type: 'message', who: 'Вы', text: 'Проверь блок допущений.' });
+    await receive({ type: 'busy', busy: true, canStop: true });
+    await activity({ type: 'agent_start' });
+    await droppedAttempt('Сверяю допущения по годам', 'terminated');
+    check(await plate().locator('.notice-title').textContent(), 'Обрыв соединения с провайдером', 'A dropped stream is explained in plain words.');
+    check(await plate().locator('.notice-detail').textContent(), 'terminated', 'The raw provider text stays under the explanation.');
+    check(await run().locator('.reasoning').first().evaluate(node => node.classList.contains('interrupted')), true, 'The reasoning of the broken attempt is marked interrupted.');
+    check(await run().locator('.reasoning .step-meta').first().textContent(), 'прервано', 'The interrupted reasoning says so instead of a duration.');
+    check(await run().locator('.reasoning').first().getAttribute('data-state'), 'stopped', 'The interrupted reasoning has no done mark.');
+    await activity({ type: 'auto_retry_start', attempt: 1, maxAttempts: 8, delayMs: 2000, errorMessage: 'terminated' });
+    check(await retryRow().locator('.retry-label').textContent(), 'Повтор 1 из 8 через 2 с', 'The retry row names the attempt and the wait.');
+    check(await retryRow().locator('.step-state .spinner').count(), 1, 'Waiting for the retry shows a spinner.');
+    check(await run().locator('.run-title').textContent(), 'Повтор 1 из 8 через 2 с', 'The card header shows the pending retry.');
+    check(await plate().getAttribute('data-outcome'), 'retried', 'A retried failure is not final.');
+    check(await background(plate()), await token('--warning-soft'), 'A retried failure is a yellow warning, not a red error.');
+    await activity({ type: 'agent_start' });
+    await droppedAttempt('Сверяю допущения заново', 'Connection error.');
+    check(await retryRow().getAttribute('data-state'), 'done', 'A new attempt ends the wait of its retry row.');
+    check(await retryRow().locator('.spinner').count(), 0, 'A sent retry no longer spins.');
+    check(await plate(1).locator('.notice-title').textContent(), 'Обрыв соединения с провайдером', 'Every dropped attempt is explained.');
+    await activity({ type: 'auto_retry_start', attempt: 2, maxAttempts: 8, delayMs: 30000, errorMessage: 'Connection error.' });
+    check(await retryRow(1).locator('.retry-label').textContent(), 'Повтор 2 из 8 через 30 с', 'A longer wait is shown in whole seconds.');
+    for (const width of [320, 410]) {
+      await page.setViewportSize({ width, height: 850 });
+      check(await retryRow(1).locator('.retry-label').evaluate(node => node.scrollWidth <= node.clientWidth && getComputedStyle(node).textOverflow !== 'ellipsis'), true, 'The retry label is never cut at width ' + width + '.');
+    }
+    await page.locator('#conversation').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await page.screenshot({ path: path.join(output, screenshots[12]) });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'turn_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await update({ type: 'thinking_delta', contentIndex: 0, delta: 'Допущения сходятся.' });
+    await activity({ type: 'message_end', message: modelMessage([{ type: 'thinking', thinking: 'Допущения сходятся.' }, { type: 'text', text: 'Допущения согласованы.' }]) });
+    await activity({ type: 'auto_retry_end', success: true, attempt: 2 });
+    await activity({ type: 'agent_settled', aborted: false });
+    await receive({ type: 'busy', busy: false, canStop: true });
+    check(await run().getAttribute('data-state'), 'done', 'A successful retry ends the request normally.');
+    check(await run().locator('.step.provider-error').evaluateAll(nodes => nodes.map(node => node.dataset.outcome)), ['retried', 'retried'], 'Recovered failures stay warnings.');
+    check(await background(plate(1)), await token('--warning-soft'), 'A recovered failure does not turn red.');
+    check(await run().locator('.reasoning.interrupted').count(), 2, 'Only the broken attempts are marked interrupted.');
+    check(await run().locator('.reasoning').last().getAttribute('data-state'), 'done', 'The reasoning of the successful attempt is ordinary.');
+    check(await run().locator('.text.final').textContent(), 'Допущения согласованы.', 'The answer after the retries is the final one.');
+    check(await timeline(), ['trace:reasoning', 'error', 'trace:retry,reasoning', 'error', 'trace:retry,reasoning', 'text'], 'Failures, retries and attempts keep their order.');
+    await page.screenshot({ path: path.join(output, screenshots[13]) });
+    // Retries run out: the last failure turns red, the retried one stays a warning.
+    await receive({ type: 'message', who: 'Вы', text: 'Ещё раз проверь допущения.' });
+    await activity({ type: 'agent_start' });
+    await droppedAttempt('Начинаю', 'Network connection lost.');
+    await activity({ type: 'auto_retry_start', attempt: 1, maxAttempts: 1, delayMs: 1500, errorMessage: 'Network connection lost.' });
+    check(await retryRow().locator('.retry-label').textContent(), 'Повтор 1 из 1 через 1,5 с', 'A short wait keeps its fraction of a second.');
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'turn_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await activity({ type: 'message_end', message: { ...modelMessage([], 'error'), errorMessage: 'connect ECONNREFUSED 127.0.0.1:443' } });
+    await activity({ type: 'agent_end', willRetry: false });
+    check(await plate(1).getAttribute('data-outcome'), 'pending', 'Until the request ends, the last failure is not yet final.');
+    check(await plate(1).locator('.notice-title').textContent(), 'Нет соединения с провайдером', 'A refused connection is not called a drop.');
+    await activity({ type: 'auto_retry_end', success: false, attempt: 1, finalError: 'connect ECONNREFUSED 127.0.0.1:443' });
+    await activity({ type: 'agent_settled', aborted: false });
+    await activity({ type: 'aperture_run_end', status: 'error' });
+    check(await plate().getAttribute('data-outcome'), 'retried', 'The retried failure stays a warning.');
+    check(await plate(1).getAttribute('data-outcome'), 'failed', 'The failure retries did not overcome is final.');
+    check(await background(plate(1)), await token('--danger-soft'), 'A final failure is red.');
+    check(await retryRow(1).locator('.retry-label').textContent(), 'Повторы не помогли · 1 повтор', 'The card says the retries ran out.');
+    check(await retryRow(1).getAttribute('data-state'), 'error', 'Running out of retries is an error.');
+    check(await run().getAttribute('data-state'), 'error', 'The request ends with the error.');
+    // Other provider errors keep their text; a Stop during the wait cancels the retry.
+    await receive({ type: 'message', who: 'Вы', text: 'Повтори проверку.' });
+    await activity({ type: 'agent_start' });
+    await droppedAttempt('Проверяю', '429 Rate limit exceeded');
+    check(await plate().locator('.notice-title').count(), 0, 'A rate limit is not called a dropped connection.');
+    check(await plate().textContent(), '429 Rate limit exceeded', 'A non-network provider error keeps its own text.');
+    await activity({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 64000, errorMessage: '429 Rate limit exceeded' });
+    check(await retryRow().locator('.retry-label').textContent(), 'Повтор 1 из 3 через 1 мин 4 с', 'A wait over a minute is shown in minutes.');
+    await activity({ type: 'auto_retry_end', success: false, attempt: 1, finalError: 'Retry cancelled' });
+    await activity({ type: 'agent_settled', aborted: true });
+    check(await retryRow().getAttribute('data-state'), 'stopped', 'A Stop during the wait cancels the retry.');
+    check(await retryRow().locator('.step-meta').textContent(), 'отменён', 'The cancelled retry says so.');
+    check(await plate().getAttribute('data-outcome'), 'retried', 'A failure the user stopped retrying does not turn red.');
+    check(await run().getAttribute('data-state'), 'stopped', 'The request is stopped.');
 
     // ---------------------------------------------------------------- layout
     for (const width of [320, 410, 760]) {

@@ -425,7 +425,7 @@ namespace Aperture.Excel
                 if (!ReferenceEquals(sender, session)) return;
                 var json = args.Json;
                 // The view builds one chronological timeline from the raw events: text,
-                // reasoning, tool calls, provider errors and retries keep their positions.
+                // reasoning, tool calls, provider errors, retries and compaction keep their positions.
                 // message_end is authoritative for the parts the delta-only stream left incomplete.
                 if (IsActivityEvent(args.Type)) view.ApplyActivity(json);
                 if (args.Type == "message_end")
@@ -477,6 +477,8 @@ namespace Aperture.Excel
                 case "message_start": case "message_update": case "message_end":
                 case "tool_execution_start": case "tool_execution_update": case "tool_execution_end":
                 case "auto_retry_start": case "auto_retry_end":
+                // Compaction runs within the request, before agent_settled; it does not decide its outcome.
+                case "compaction_start": case "compaction_end": case "summarization_retry_scheduled":
                 case "agent_settled": case "process_exit": case "error": return true;
                 default: return false;
             }

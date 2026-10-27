@@ -39,6 +39,7 @@
     pulse: 'M2 8.5h3l1.5-4 3 7 1.5-3H14',
     tool: 'M10 2.8a3 3 0 0 0-3.7 3.9L2.8 10.2l3 3 3.5-3.5A3 3 0 0 0 13.2 6l-1.8 1.8-2.2-.3-.3-2.2z',
     copy: 'M5.5 5.5h7v8h-7zM3.5 10.5v-8h7',
+    compress: 'M8 2.5v4M5.5 4.5 8 6.5l2.5-2M8 13.5v-4M5.5 11.5 8 9.5l2.5 2M3 8h10',
     stop: 'M5 5h6v6H5z'
   };
   function icon(name, className = 'icon') {
@@ -342,7 +343,7 @@
     const run = {
       node, header, title, meta, body, footer, tools: new Map(), models: [], model: null, lastGroup: null,
       startedAt: Date.now(), finishedAt: 0, finished: false, status: 'running', current: 'Начинаю работу',
-      modelNames: [], outputTokens: 0, streamMs: 0, pendingSequence: 0, notices: new Set()
+      modelNames: [], outputTokens: 0, streamMs: 0, pendingSequence: 0, notices: new Set(), compactions: []
     };
     header.addEventListener('click', () => {
       const collapsed = !node.classList.contains('collapsed');
@@ -699,6 +700,75 @@
     place(run, node, start ? 'notice' : 'error');
     setCurrent(run, start ? 'Повтор запроса к провайдеру' : 'Повтор не удался');
   }
+
+  // Context compaction: Pi runs it before the prompt, between turns or after agent_end, always
+  // before agent_settled, so it is a step of the card in progress. Its end updates the same row.
+  const COMPACTION_REASON = { threshold: 'контекст близок к пределу', overflow: 'контекст переполнен', manual: 'по команде' };
+  function compactionStep(run, reason) {
+    const step = stepNode('compaction', 'compress', 'Сжимаю контекст…');
+    const item = Object.assign(step, { kind: 'compaction', reason, startedAt: Date.now(), ended: false, summary: '' });
+    item.info = element('p', 'step-info', 'reason: ' + (reason || 'не указана'));
+    item.retryInfo = element('p', 'step-info warning');
+    item.retryInfo.hidden = true;
+    item.errorSection = detailSection('Ошибка');
+    item.summaryNode = element('div', 'markdown');
+    item.summarySection = element('section');
+    item.summarySection.append(element('h4', '', 'Сводка'), item.summaryNode);
+    item.summarySection.hidden = true;
+    item.detail.append(item.info, item.retryInfo, item.errorSection.section, item.summarySection);
+    // A long summary is rendered only when the row is opened.
+    item.node.addEventListener('toggle', () => { if (item.node.open && item.summary) queueMarkdown(item.summaryNode, item.summary); });
+    place(run, item.node, 'compaction');
+    run.compactions.push(item);
+    setState(item, 'running');
+    item.context.textContent = COMPACTION_REASON[reason] || '';
+    return item;
+  }
+  function activeCompaction(run) { return run.compactions.filter(item => !item.ended).pop(); }
+  function startCompaction(event) {
+    const run = ensureRun();
+    compactionStep(run, event.reason);
+    setCurrent(run, 'Сжимаю контекст');
+  }
+  function compactionRetry(event) {
+    // Branch summaries use the same retry events; only a compaction in progress shows them.
+    const item = currentRun && activeCompaction(currentRun);
+    if (!item) return;
+    const attempt = (event.attempt || '?') + (event.maxAttempts ? ' из ' + event.maxAttempts : '');
+    item.context.textContent = [COMPACTION_REASON[item.reason], 'повтор ' + attempt].filter(Boolean).join(' · ');
+    item.retryInfo.textContent = 'Повтор запроса сводки, попытка ' + attempt + (event.errorMessage ? ': ' + event.errorMessage : '');
+    item.retryInfo.hidden = false;
+  }
+  function endCompaction(event) {
+    const run = ensureRun();
+    // Pi reports a failed second overflow recovery with compaction_end alone.
+    const item = activeCompaction(run) || Object.assign(compactionStep(run, event.reason), { startedAt: 0 });
+    item.ended = true;
+    const result = event.result && typeof event.result === 'object' ? event.result : null;
+    const before = result && Number.isFinite(result.tokensBefore) && result.tokensBefore > 0 ? result.tokensBefore : null;
+    let label = 'Сжатие не завершено', state = 'unknown', context = '';
+    if (event.aborted) { label = 'Сжатие прервано'; state = 'stopped'; }
+    else if (result) {
+      label = 'Контекст сжат'; state = 'done';
+      context = [before !== null ? 'до сжатия ' + tokens(before) + ' ток.' : '', event.willRetry ? 'повтор запроса' : ''].filter(Boolean).join(' · ');
+    } else if (event.errorMessage) { label = 'Сжатие не удалось'; state = 'error'; context = plainLine(event.errorMessage); }
+    item.labelNode.textContent = label;
+    item.context.textContent = context;
+    setState(item, state);
+    item.meta.textContent = item.startedAt ? seconds(Date.now() - item.startedAt) : '';
+    const facts = ['reason: ' + (event.reason || item.reason || 'не указана')];
+    if (before !== null) facts.push('tokensBefore: ' + before);
+    if (result && Number.isFinite(result.estimatedTokensAfter)) facts.push('estimatedTokensAfter: ' + result.estimatedTokensAfter);
+    if (event.willRetry) facts.push('willRetry');
+    item.info.textContent = facts.join(' · ');
+    if (event.errorMessage) { item.errorSection.content.textContent = event.errorMessage; item.errorSection.section.hidden = false; }
+    if (result && typeof result.summary === 'string' && result.summary.trim()) {
+      item.summary = result.summary;
+      item.summarySection.hidden = false;
+      if (item.node.open) queueMarkdown(item.summaryNode, item.summary);
+    }
+    setCurrent(run, label);
+  }
   // Host facts the user has to see (errors, unconfirmed stop, unknown outcome, notes): inside the card
   // of the request in progress, otherwise as their own line. An immediate repeat is not added again.
   function noticeCopy(title, detail) {
@@ -759,9 +829,18 @@
         part.endedAt = Date.now(); part.meta.textContent = seconds(part.endedAt - part.startedAt); setState(part, 'done');
       }
     }));
+    // The run ended without compaction_end: its outcome is not known. A late end still updates the row.
+    run.compactions.forEach(item => {
+      if (item.state !== 'running') return;
+      item.labelNode.textContent = 'Сжатие не завершено';
+      item.meta.textContent = seconds(Date.now() - item.startedAt);
+      setState(item, 'unknown');
+    });
     flushMarkdown();
     run.body.querySelectorAll(':scope > .final').forEach(node => node.classList.remove('final'));
-    const last = run.body.lastElementChild;
+    let last = run.body.lastElementChild;
+    // A compaction after agent_end follows the answer but does not replace it as the final one.
+    while (last && last.classList.contains('trace') && Array.from(last.children).every(step => step.classList.contains('compaction'))) last = last.previousElementSibling;
     if (last && last.classList.contains('text')) last.classList.add('final');
     updateRun(run);
     renderFooter(run, last && last.classList.contains('text') ? last : null);
@@ -832,6 +911,9 @@
       case 'tool_execution_start': case 'tool_execution_update': case 'tool_execution_end': toolEvent(event); break;
       case 'auto_retry_start': retryNotice(event, true); break;
       case 'auto_retry_end': if (event.success === false) retryNotice(event, false); break;
+      case 'compaction_start': startCompaction(event); break;
+      case 'summarization_retry_scheduled': compactionRetry(event); break;
+      case 'compaction_end': endCompaction(event); break;
       // agent_end may precede an automatic retry. Only agent_settled is terminal.
       case 'agent_settled': finishRun(event.aborted ? 'stopped' : 'done'); break;
       // The host ends only a request the user submitted: a Stop before Pi's first event still gets its card.

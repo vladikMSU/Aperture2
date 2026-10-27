@@ -10,7 +10,8 @@ const root = path.resolve(__dirname, '../..');
 const output = path.join(root, 'work');
 const screenshots = ['chat-webview-welcome.png', 'chat-webview-conversation.png', 'chat-webview-streaming.png',
   'chat-webview-collapsed.png', 'chat-webview-narrow.png', 'chat-webview-light.png', 'chat-webview-all-tools.png',
-  'chat-webview-composer-idle.png', 'chat-webview-composer-busy.png', 'chat-webview-composer-error.png'];
+  'chat-webview-composer-idle.png', 'chat-webview-composer-busy.png', 'chat-webview-composer-error.png',
+  'chat-webview-compaction-running.png', 'chat-webview-compaction.png'];
 let checks = 0;
 function check(actual, expected, message) {
   assert.deepStrictEqual(actual, expected, message);
@@ -332,6 +333,114 @@ function check(actual, expected, message) {
     check(await run().locator('.run-facts').getAttribute('title'), 'openrouter/free\nvendor/first:free\nvendor/second:free', 'All concrete models stay available in the tooltip.');
     await activity({ type: 'aperture_run_end', status: 'stopped' });
     check(await run().locator('.step.notice.stopped').count(), 1, 'The host end of a stopped run must not repeat "Ответ остановлен".');
+
+    // ---------------------------------------------------------------- context compaction is a step of its request
+    await receive({ type: 'clear_transcript' });
+    const compaction = (index = 0) => run().locator('.step.compaction').nth(index);
+    const steps = () => run().locator('.run-body > *').evaluateAll(nodes => nodes.map(node => node.classList.contains('trace')
+      ? 'trace:' + Array.from(node.children).map(step => step.classList.contains('compaction') ? 'compaction' : step.classList.contains('tool') ? step.dataset.toolCallId : step.classList.contains('error') ? 'error' : 'other').join(',')
+      : node.classList.contains('error') ? 'error' : 'text'));
+    await receive({ type: 'message', who: 'Вы', text: 'Продолжи аудит модели.' });
+    await receive({ type: 'busy', busy: true, canStop: true });
+    // Pi checks the context before sending the prompt: this compaction precedes agent_start.
+    await activity({ type: 'compaction_start', reason: 'threshold' });
+    check(await run().locator('.step.compaction').count(), 1, 'compaction_start must add a step to the card of the request.');
+    check(await compaction().getAttribute('data-state'), 'running', 'A compaction in progress is a running step.');
+    check(await compaction().locator('.step-state .spinner').count(), 1, 'A compaction in progress shows a spinner.');
+    check(await compaction().locator('.step-label').textContent(), 'Сжимаю контекст…', 'The step says the context is being compacted.');
+    check(await compaction().locator('.step-context').textContent(), 'контекст близок к пределу', 'The step names the reason Pi gave.');
+    check(await run().locator('.run-title').textContent(), 'Сжимаю контекст', 'The card header shows the compaction as the current action.');
+    await activity({ type: 'summarization_retry_scheduled', attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: 'Synthetic stream drop' });
+    check(await compaction().locator('.step-context').textContent(), 'контекст близок к пределу · повтор 1 из 3', 'A retried summary request is shown in the same row.');
+    check(await page.locator('#composer-status, #status').count(), 0, 'Compaction must not bring back a status line under the composer.');
+    await page.screenshot({ path: path.join(output, screenshots[10]) });
+    const summary = '## Цель\n\nАудит синтетической модели: **DCF** и Inputs.';
+    await activity({ type: 'compaction_end', reason: 'threshold', result: { summary, firstKeptEntryId: 'entry-7', tokensBefore: 152340, estimatedTokensAfter: 20990 }, aborted: false, willRetry: false });
+    check(await run().locator('.step.compaction').count(), 1, 'compaction_end must update the same row, not add another.');
+    check(await compaction().getAttribute('data-state'), 'done', 'A finished compaction is done.');
+    check(await compaction().locator('.step-label').textContent(), 'Контекст сжат', 'The finished row says the context was compacted.');
+    check(await compaction().locator('.step-context').textContent(), 'до сжатия 152,3 тыс. ток.', 'The row shows the tokens Pi counted before compaction.');
+    check(/^\d+,\d с$/.test(await compaction().locator('.step-meta').textContent()), true, 'The finished row shows its duration.');
+    check(await compaction().locator('.markdown').textContent(), '', 'The summary stays lazy while the row is collapsed.');
+    await compaction().locator('summary').click();
+    await paint();
+    check(await compaction().locator('.markdown h2').textContent(), 'Цель', 'The opened row renders the summary Pi kept.');
+    check(await compaction().locator('.step-info').first().textContent(), 'reason: threshold · tokensBefore: 152340 · estimatedTokensAfter: 20990', 'Details keep the exact figures Pi reported.');
+    check(await compaction().locator('.step-info.warning').textContent(), 'Повтор запроса сводки, попытка 1 из 3: Synthetic stream drop', 'Details keep the retry and its error.');
+    await compaction().locator('summary').click();
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'turn_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await update({ type: 'text_delta', contentIndex: 0, delta: 'Сверю итог.' });
+    const auditCall = { type: 'toolCall', id: 'after-compaction', name: 'mcp__aperture_excel__excel_read_range', arguments: { sheet: 'DCF', address: 'F24' } };
+    await activity({ type: 'message_end', message: modelMessage([{ type: 'text', text: 'Сверю итог.' }, auditCall], 'toolUse') });
+    await activity({ type: 'tool_execution_start', toolCallId: auditCall.id, toolName: auditCall.name, args: auditCall.arguments });
+    await activity({ type: 'tool_execution_end', toolCallId: auditCall.id, toolName: auditCall.name, result: { values: [[1]] }, isError: false, durationMs: 30 });
+    await activity({ type: 'turn_end' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await activity({ type: 'message_end', message: modelMessage([{ type: 'text', text: 'Итог сходится с допущениями.' }]) });
+    await activity({ type: 'agent_end', willRetry: false });
+    // Threshold compaction after the answer: after agent_end, before agent_settled.
+    await activity({ type: 'compaction_start', reason: 'threshold' });
+    check(await run().getAttribute('data-state'), 'running', 'A compaction after agent_end keeps the card running.');
+    check(await compaction(1).getAttribute('data-state'), 'running', 'The second compaction is its own running row.');
+    await activity({ type: 'compaction_end', reason: 'threshold', aborted: false, willRetry: false, errorMessage: 'Auto-compaction failed: Synthetic summary failure' });
+    check(await compaction(1).getAttribute('data-state'), 'error', 'A failed compaction is an error in its own row.');
+    check(await compaction(1).locator('.step-label').textContent(), 'Сжатие не удалось', 'The failed row says compaction failed.');
+    check(await compaction(1).locator('.step-context').textContent(), 'Auto-compaction failed: Synthetic summary failure', 'The failed row shows Pi\'s error.');
+    await activity({ type: 'agent_settled', aborted: false });
+    await receive({ type: 'busy', busy: false, canStop: true });
+    check(await run().getAttribute('data-state'), 'done', 'agent_settled finishes the card after the compaction.');
+    check(await steps(), ['trace:compaction', 'text', 'trace:after-compaction', 'text', 'trace:compaction'], 'Compaction steps keep their place in the timeline.');
+    check(await run().locator('.run-footer .copy-button').count(), 1, 'The answer before a trailing compaction can still be copied.');
+    check(await run().locator('.text.final').textContent(), 'Итог сходится с допущениями.', 'A compaction after the answer does not hide the final answer.');
+    await run().locator('.run-header').click();
+    check(await compaction(1).isVisible(), false, 'Collapsing the card hides compaction steps with the rest of the work.');
+    await run().locator('.run-header').click();
+    await page.locator('#conversation').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await page.screenshot({ path: path.join(output, screenshots[11]) });
+    // Overflow: the provider rejected the context, Pi compacts and retries the request.
+    await receive({ type: 'message', who: 'Вы', text: 'Сравни все листы.' });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await activity({ type: 'message_end', message: { ...modelMessage([], 'error'), errorMessage: 'Synthetic maximum context length exceeded' } });
+    await activity({ type: 'agent_end', willRetry: false });
+    await activity({ type: 'compaction_start', reason: 'overflow' });
+    check(await compaction().locator('.step-context').textContent(), 'контекст переполнен', 'An overflow compaction says the context overflowed.');
+    await activity({ type: 'compaction_end', reason: 'overflow', result: { summary: '', firstKeptEntryId: 'entry-9', tokensBefore: 210000 }, aborted: false, willRetry: true });
+    check(await compaction().locator('.step-context').textContent(), 'до сжатия 210,0 тыс. ток. · повтор запроса', 'An overflow compaction says the request is retried.');
+    check(await compaction().locator('section').evaluateAll(nodes => nodes.map(node => node.hidden)), [true, true], 'An empty summary and no error leave no detail sections.');
+    await activity({ type: 'message_start', message: modelMessage() });
+    await activity({ type: 'message_end', message: modelMessage([{ type: 'text', text: 'Листы сравнены.' }]) });
+    await activity({ type: 'agent_settled', aborted: false });
+    check(await steps(), ['error', 'trace:compaction', 'text'], 'The overflow error, the compaction and the retried answer stay in order.');
+    // Pi gives up after one overflow recovery with compaction_end alone; no token count is invented.
+    await receive({ type: 'message', who: 'Вы', text: 'Ещё раз.' });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'compaction_end', reason: 'overflow', aborted: false, willRetry: false, errorMessage: 'Context overflow recovery failed after one compact-and-retry attempt.' });
+    check(await compaction().getAttribute('data-state'), 'error', 'A compaction_end without a start still gets its row.');
+    check(await compaction().locator('.step-meta').textContent(), '', 'Without a start there is no duration to show.');
+    check((await compaction().textContent()).includes('ток.'), false, 'No token count is shown when Pi gave none.');
+    await activity({ type: 'agent_settled', aborted: false });
+    // Stop during compaction: Pi aborts it before the request settles.
+    await receive({ type: 'message', who: 'Вы', text: 'Остановлю сжатие.' });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'compaction_start', reason: 'threshold' });
+    await activity({ type: 'compaction_end', reason: 'threshold', aborted: true, willRetry: false });
+    await activity({ type: 'agent_settled', aborted: true });
+    check(await compaction().getAttribute('data-state'), 'stopped', 'An aborted compaction is stopped, not an error.');
+    check(await compaction().locator('.step-label').textContent(), 'Сжатие прервано', 'The aborted row says so.');
+    check(await run().getAttribute('data-state'), 'stopped', 'A Stop during compaction stops the card.');
+    // The agent ended mid-compaction: the outcome is unknown until a late end arrives.
+    await receive({ type: 'message', who: 'Вы', text: 'Агент упадёт при сжатии.' });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'compaction_start', reason: 'threshold' });
+    await activity({ type: 'process_exit' });
+    check(await compaction().getAttribute('data-state'), 'unknown', 'A card ended during compaction must not claim the compaction finished.');
+    check(await compaction().locator('.step-label').textContent(), 'Сжатие не завершено', 'The row says the compaction did not finish.');
+    await activity({ type: 'compaction_end', reason: 'threshold', result: { summary: 's', firstKeptEntryId: 'e', tokensBefore: 99000 }, aborted: false, willRetry: false });
+    check(await compaction().locator('.step-label').textContent(), 'Контекст сжат', 'A late compaction_end still updates the same row.');
+    check(await run().locator('.step.compaction').count(), 1, 'A late compaction_end must not add a row.');
 
     // ---------------------------------------------------------------- layout
     for (const width of [320, 410, 760]) {

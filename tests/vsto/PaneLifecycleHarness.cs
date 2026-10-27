@@ -416,6 +416,32 @@ internal static class PaneLifecycleHarness
                 "A successful Pi retry retained the earlier provider failure.");
         }
 
+        Console.WriteLine("CASE: context compaction reaches the card of its request and does not decide its outcome.");
+        ResetFake();
+        using (var pane = CreatePane())
+        {
+            var running = await StartSessionAsync(pane);
+            var view = View(pane);
+            await EmitAsync(pane, running,
+                "{type:'compaction_start',reason:'threshold'}",
+                "{type:'summarization_retry_scheduled',attempt:1,maxAttempts:3,delayMs:100,errorMessage:'stream dropped'}",
+                "{type:'compaction_end',reason:'threshold',result:{summary:'s',firstKeptEntryId:'e1',tokensBefore:150000},aborted:false,willRetry:false}",
+                "{type:'agent_start'}",
+                "{type:'message_end',message:{role:'assistant',content:[{type:'text',text:'ok'}],stopReason:'stop'}}",
+                "{type:'agent_end',messages:[],willRetry:false}",
+                "{type:'compaction_start',reason:'threshold'}");
+            Check(Field<bool>(pane, "busy") && !HasTerminal(view, "error"), "A compaction after agent_end released or ended the request.");
+            await EmitAsync(pane, running,
+                "{type:'compaction_end',reason:'threshold',result:null,aborted:false,willRetry:false,errorMessage:'Auto-compaction failed: synthetic'}",
+                "{type:'agent_settled',aborted:false}");
+            var types = view.Activity.ConvertAll(item => (string)item["type"]);
+            Check(types.FindAll(type => type == "compaction_start").Count == 2 && types.FindAll(type => type == "compaction_end").Count == 2
+                && types.Contains("summarization_retry_scheduled"), "Compaction events were not forwarded to the view.");
+            Check(types.LastIndexOf("compaction_end") < types.IndexOf("agent_settled"), "The compaction did not reach the card before its end.");
+            Check(!HasTerminal(view, "error") && !Field<bool>(pane, "busy") && view.Notices.Count == 0,
+                "A failed compaction after the answer turned the request into an error or a notice.");
+        }
+
         Console.WriteLine("CASE: confirmed Stop and process errors terminate active cards; stale sessions remain isolated.");
         ResetFake();
         using (var pane = CreatePane())

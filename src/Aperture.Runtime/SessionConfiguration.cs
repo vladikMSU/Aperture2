@@ -24,6 +24,11 @@ namespace Aperture.Runtime
             "Keep the user informed in visible text, not only in reasoning: before each group of tool calls write one or two short sentences " +
             "in the user's language saying what you have established so far and what you will check next, and share notable intermediate findings as you go. " +
             "Never leave a step with only tool calls. Keep these updates brief and finish with the complete answer. " +
+            "When a task asks for a long result in the workbook, write it there as you go, in small parts of about 5-10 rows per call; " +
+            "do not draft large tables or long lists in reasoning first. If a write is rejected or fails, retry with smaller parts. " +
+            "Writing an intermediate result does not end the task: before finishing, check the request's requirements (scope, checks, every item it lists) " +
+            "and keep working until they are met. Keep reasoning short and to the point: each response, reasoning included, has a hard output limit, " +
+            "and a response cut off by it loses its work. Finish with a brief self-check of what was covered, what was not and why. " +
             "Use only the bound live workbook exposed by the aperture_excel MCP server. " +
             "Call excel_target before relying on workbook facts. Always pass the exact excelInstanceId and workbookId required by the tools. " +
             "excel_target returns metadata only: sheet names, used-range bounds, counts and application state; it does not read cell values, formulas or dependencies. " +

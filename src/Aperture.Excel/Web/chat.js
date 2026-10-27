@@ -344,7 +344,7 @@
       node, header, title, meta, body, footer, tools: new Map(), models: [], model: null, lastGroup: null,
       startedAt: Date.now(), finishedAt: 0, finished: false, status: 'running', current: 'Начинаю работу',
       modelNames: [], outputTokens: 0, streamMs: 0, pendingSequence: 0, notices: new Set(), compactions: [],
-      providerErrors: [], retry: null
+      plates: [], retry: null, lastStop: null, truncated: null
     };
     header.addEventListener('click', () => {
       const collapsed = !node.classList.contains('collapsed');
@@ -360,7 +360,7 @@
     const time = elapsed((run.finishedAt || Date.now()) - run.startedAt);
     run.node.dataset.state = run.finished ? run.status : 'running';
     run.title.textContent = run.finished
-      ? ({ done: 'Ход работы', stopped: 'Остановлено', error: 'Завершено с ошибкой' }[run.status] || 'Ход работы')
+      ? ({ done: 'Ход работы', stopped: 'Остановлено', error: 'Завершено с ошибкой', truncated: 'Ответ оборван' }[run.status] || 'Ход работы')
       : run.current;
     run.title.title = run.title.textContent;
     run.meta.textContent = [actions ? plural(actions, ['действие', 'действия', 'действий']) : '', time].filter(Boolean).join(' · ');
@@ -435,6 +435,9 @@
   function startModel(message) {
     const run = ensureRun();
     endRetry(run, 'done'); // the wait is over: the request is sent again
+    // Pi went on past an earlier failure, so that failure is not how the request ends.
+    settleErrors(run, 'pending', 'retried');
+    run.truncated = null;
     const model = { parts: new Map(), blankText: new Map(), startedAt: Date.now() };
     run.models.push(model); run.model = model;
     if (message) noteModel(run, message);
@@ -648,7 +651,11 @@
     if (event.type === 'tool_execution_end') {
       tool.output = event.result;
       tool.outputSection.section.querySelector('h4').textContent = 'Результат';
-      setToolState(tool, event.isError ? 'error' : 'done', event.durationMs);
+      if (tool.truncated && event.isError) {
+        // Pi reports the calls of a response cut at the output limit as errors without running them.
+        setToolState(tool, 'not_run');
+        tool.detail.appendChild(element('p', 'step-info warning', 'Pi не исполнил вызов: ответ оборван по лимиту длины, аргументы могли оборваться.'));
+      } else setToolState(tool, event.isError ? 'error' : 'done', event.durationMs);
     }
     renderTool(tool);
     refreshCurrent(run);
@@ -687,9 +694,11 @@
     } else if (message.errorMessage || message.stopReason === 'error') {
       model.parts.forEach(part => { if (part.kind === 'reasoning' || part.kind === 'text') interrupt(part); });
       providerError(run, message.errorMessage);
-    } else settleErrors(run, 'pending', 'recovered');
+    } else if (message.stopReason === 'length') truncation(run, model, message);
+    else settleErrors(run, 'pending', 'recovered');
+    run.lastStop = message.stopReason;
     run.model = null;
-    if (!run.finished) setCurrent(run, 'Думаю');
+    if (!run.finished) setCurrent(run, message.stopReason === 'length' ? 'Ответ оборван' : 'Думаю');
   }
   // Provider errors. Transport failures that Pi retries (the network part of its retryable patterns) get a
   // plain title with the raw text below; load, limit and other provider errors keep their own text.
@@ -698,16 +707,43 @@
   function providerError(run, raw) {
     const text = raw || 'Провайдер вернул ошибку.';
     const title = CONNECTION_LOST.test(text) ? 'Обрыв соединения с провайдером' : NO_CONNECTION.test(text) ? 'Нет соединения с провайдером' : null;
-    const node = element('div', 'step error provider-error');
-    node.append(icon('alert', 'step-icon'), title ? noticeCopy(title, text) : element('span', '', text));
-    place(run, node, 'error');
-    const plate = { node };
-    run.providerErrors.push(plate);
-    setOutcome(plate, 'pending');
+    plate(run, 'provider-error', title ? noticeCopy(title, text) : element('span', '', text));
   }
   // A failure Pi may still recover from is a warning; it turns red only when the request ends with it.
+  function plate(run, kind, content) {
+    const node = element('div', 'step error ' + kind);
+    node.append(icon('alert', 'step-icon'), content);
+    place(run, node, 'error');
+    const item = { node };
+    run.plates.push(item);
+    setOutcome(item, 'pending');
+    return item;
+  }
   function setOutcome(plate, outcome) { plate.outcome = outcome; plate.node.dataset.outcome = outcome; }
-  function settleErrors(run, from, to) { run.providerErrors.forEach(plate => { if (plate.outcome === from) setOutcome(plate, to); }); }
+  function settleErrors(run, from, to) { run.plates.forEach(plate => { if (plate.outcome === from) setOutcome(plate, to); }); }
+  // A response cut at the output token limit. Pi keeps it, fails its tool calls (their arguments may be cut
+  // too) and goes on; without tool calls the turn ends there, unless Pi compacts and retries it.
+  function truncation(run, model, message) {
+    const calls = Array.from(model.parts.values()).filter(part => part.kind === 'tool' && part.state === 'queued');
+    calls.forEach(tool => { tool.truncated = true; });
+    // The part the stream stopped in; tool calls get their own outcome from Pi.
+    let lastKey = -1;
+    model.parts.forEach((part, key) => { if (Number.isInteger(key) && key > lastKey) lastKey = key; });
+    const last = model.parts.get(lastKey);
+    if (last && last.kind === 'reasoning') {
+      last.node.classList.add('truncated');
+      last.meta.textContent = [last.meta.textContent, 'оборвано'].filter(Boolean).join(' · ');
+      setState(last, 'stopped');
+    } else if (last && last.kind === 'text') last.node.classList.add('truncated');
+    const output = message.usage && Number.isFinite(message.usage.output) && message.usage.output > 0 ? message.usage.output : null;
+    const facts = [];
+    if (output !== null) facts.push('Выведено ' + String(output).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0') + ' ток.');
+    if (calls.length) facts.push(calls.length === 1 ? 'вызов не исполнен: аргументы могли оборваться'
+      : plural(calls.length, ['вызов', 'вызова', 'вызовов']) + ' не исполнены: аргументы могли оборваться');
+    if (facts.length) facts[0] = facts[0][0].toUpperCase() + facts[0].slice(1);
+    plate(run, 'truncation', noticeCopy('Ответ оборван: достигнут лимит длины ответа', facts.join(' · ')));
+    run.truncated = model;
+  }
   function delayText(ms) {
     if (ms < 10000 && ms % 1000) return (Math.max(100, ms) / 1000).toFixed(1).replace('.', ',') + ' с';
     const total = Math.round(ms / 1000);
@@ -750,6 +786,7 @@
   }
   // The stream of a failed attempt broke off: its partial reasoning and text are not the agent's result.
   function interrupt(part) {
+    part.node.classList.remove('truncated');
     part.node.classList.add('interrupted');
     if (part.kind !== 'reasoning') return;
     part.meta.textContent = 'прервано';
@@ -822,6 +859,11 @@
       item.summarySection.hidden = false;
       if (item.node.open) queueMarkdown(item.summaryNode, item.summary);
     }
+    // A cut response Pi retries after compaction is left out of the context, like a failed attempt.
+    if (event.willRetry && run.truncated) {
+      run.truncated.parts.forEach(part => { if (part.kind === 'reasoning' || part.kind === 'text') interrupt(part); });
+      run.truncated = null;
+    }
     setCurrent(run, label);
   }
   // Host facts the user has to see (errors, unconfirmed stop, unknown outcome, notes): inside the card
@@ -861,6 +903,8 @@
   function finishRun(status) {
     const run = currentRun;
     if (!run) return;
+    // Pi ended the turn on a cut response: there is no answer to show as the result.
+    if (status === 'done' && run.lastStop === 'length') status = 'truncated';
     run.finished = true; run.status = status;
     if (!run.finishedAt) run.finishedAt = Date.now();
     if (status === 'stopped' && !run.body.querySelector('.notice.stopped')) {

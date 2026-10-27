@@ -11,7 +11,8 @@ const output = path.join(root, 'work');
 const screenshots = ['chat-webview-welcome.png', 'chat-webview-conversation.png', 'chat-webview-streaming.png',
   'chat-webview-collapsed.png', 'chat-webview-narrow.png', 'chat-webview-light.png', 'chat-webview-all-tools.png',
   'chat-webview-composer-idle.png', 'chat-webview-composer-busy.png', 'chat-webview-composer-error.png',
-  'chat-webview-compaction-running.png', 'chat-webview-compaction.png', 'chat-webview-retry-waiting.png', 'chat-webview-retry.png'];
+  'chat-webview-compaction-running.png', 'chat-webview-compaction.png', 'chat-webview-retry-waiting.png', 'chat-webview-retry.png',
+  'chat-webview-truncated.png'];
 let checks = 0;
 function check(actual, expected, message) {
   assert.deepStrictEqual(actual, expected, message);
@@ -453,7 +454,7 @@ function check(actual, expected, message) {
     }, name);
     const timeline = () => run().locator('.run-body > *').evaluateAll(nodes => nodes.map(node => node.classList.contains('trace')
       ? 'trace:' + Array.from(node.children).map(step => ['retry', 'reasoning', 'tool', 'compaction'].find(kind => step.classList.contains(kind)) || 'other').join(',')
-      : node.classList.contains('provider-error') ? 'error' : node.classList.contains('text') ? 'text' : 'other'));
+      : node.classList.contains('provider-error') || node.classList.contains('truncation') ? 'error' : node.classList.contains('text') ? 'text' : 'other'));
     // Synthetic attempt: the stream breaks off while the model reasons; Pi retries it.
     const droppedAttempt = async (thinking, errorMessage) => {
       await activity({ type: 'turn_start' });
@@ -543,6 +544,118 @@ function check(actual, expected, message) {
     check(await retryRow().locator('.step-meta').textContent(), 'отменён', 'The cancelled retry says so.');
     check(await plate().getAttribute('data-outcome'), 'retried', 'A failure the user stopped retrying does not turn red.');
     check(await run().getAttribute('data-state'), 'stopped', 'The request is stopped.');
+
+    // ---------------------------------------------------------------- responses cut at the output limit
+    await receive({ type: 'clear_transcript' });
+    const cut = (index = 0) => run().locator('.step.truncation').nth(index);
+    const cutTitle = 'Ответ оборван: достигнут лимит длины ответа';
+    // Pi fails every call of a cut response without running it, then goes on.
+    const piRefusal = name => ({ content: [{ type: 'text', text: 'Tool call "' + name + '" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.' }], details: {} });
+    await receive({ type: 'message', who: 'Вы', text: 'Оформи реестр допущений.' });
+    await receive({ type: 'busy', busy: true, canStop: true });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'turn_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await update({ type: 'thinking_delta', contentIndex: 0, delta: 'Оформлю реестр двумя диапазонами.' });
+    const cutCalls = [
+      { type: 'toolCall', id: 'cut-1', name: 'excel_format', arguments: { sheet: 'Реестр', range: 'A1:D40' } },
+      { type: 'toolCall', id: 'cut-2', name: 'excel_format', arguments: { sheet: 'Реестр', range: 'A41' } }];
+    await update({ type: 'toolcall_start', contentIndex: 1, id: 'cut-1', toolName: 'excel_format' });
+    await update({ type: 'toolcall_end', contentIndex: 1, toolCall: cutCalls[0] });
+    await update({ type: 'toolcall_start', contentIndex: 2, id: 'cut-2', toolName: 'excel_format' });
+    await update({ type: 'toolcall_delta', contentIndex: 2, delta: '{"sheet":"Реестр","range":"A41' });
+    await activity({ type: 'message_end', message: { ...modelMessage([{ type: 'thinking', thinking: 'Оформлю реестр двумя диапазонами.' }, ...cutCalls], 'length'), usage: { input: 900, output: 8192, totalTokens: 9092 } } });
+    check(await cut().locator('.notice-title').textContent(), cutTitle, 'A response cut at the limit is explained.');
+    check(await cut().locator('.notice-detail').textContent(), 'Выведено 8\u00a0192 ток. · 2 вызова не исполнены: аргументы могли оборваться', 'The plate gives the output tokens and says the calls are not run.');
+    check(await cut().getAttribute('data-outcome'), 'pending', 'Pi may still go on from a cut response.');
+    check(await background(cut()), await token('--warning-soft'), 'A cut response Pi goes on from is a warning.');
+    check(await run().locator('.reasoning.truncated').count(), 0, 'Reasoning before the calls is complete: only the part the stream stopped in is marked.');
+    for (const call of cutCalls) {
+      await activity({ type: 'tool_execution_start', toolCallId: call.id, toolName: call.name, args: call.arguments });
+      await activity({ type: 'tool_execution_end', toolCallId: call.id, toolName: call.name, result: piRefusal(call.name), isError: true });
+      await activity({ type: 'message_start', message: { role: 'toolResult', toolCallId: call.id, toolName: call.name, content: piRefusal(call.name).content, isError: true } });
+      await activity({ type: 'message_end', message: { role: 'toolResult', toolCallId: call.id, toolName: call.name, content: piRefusal(call.name).content, isError: true } });
+    }
+    check(await run().locator('.tool').count(), 2, 'The calls of the cut response keep one card each.');
+    check(await run().locator('.tool').evaluateAll(nodes => nodes.map(node => node.dataset.state)), ['not_run', 'not_run'], 'Pi did not run the calls of a cut response.');
+    check(await run().locator('.tool .step-meta').allTextContents(), ['не исполнен', 'не исполнен'], 'The calls say they were not run.');
+    check(await run().locator('.tool .spinner').count(), 0, 'No call of the cut response keeps spinning.');
+    check(await tool('cut-2').locator('.step-info.warning').textContent(), 'Pi не исполнил вызов: ответ оборван по лимиту длины, аргументы могли оборваться.', 'The call explains why it was not run.');
+    await tool('cut-2').locator('summary').click();
+    await paint();
+    check((await tool('cut-2').locator('pre').last().textContent()).includes('was not executed'), true, 'Pi\'s own result stays in the details.');
+    await tool('cut-2').locator('summary').click();
+    await activity({ type: 'turn_end' });
+    await activity({ type: 'turn_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    check(await cut().getAttribute('data-outcome'), 'retried', 'Once Pi goes on, the cut response is not how the request ends.');
+    await activity({ type: 'message_end', message: modelMessage([{ type: 'text', text: 'Реестр оформлен в два шага.' }]) });
+    await activity({ type: 'turn_end' });
+    await activity({ type: 'agent_end' });
+    await activity({ type: 'agent_settled', aborted: false });
+    check(await run().getAttribute('data-state'), 'done', 'A request that went on after the cut ends normally.');
+    check(await background(cut()), await token('--warning-soft'), 'The cut stays a warning once Pi went on.');
+    check(await run().locator('.text.final').textContent(), 'Реестр оформлен в два шага.', 'The answer after the cut is the final one.');
+    check(await timeline(), ['trace:reasoning,tool,tool', 'error', 'text'], 'The cut stands after the partial content of its response.');
+    // The turn ends on reasoning cut at the limit: no answer, and the card says so.
+    await receive({ type: 'message', who: 'Вы', text: 'Составь реестр всех допущений.' });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'turn_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await update({ type: 'thinking_delta', contentIndex: 0, delta: 'Строка 1: темп роста выручки. Строка 2: доля себестоимости.' });
+    await activity({ type: 'message_end', message: { ...modelMessage([{ type: 'thinking', thinking: 'Строка 1: темп роста выручки. Строка 2: доля себестоимости.' }], 'length'), usage: { input: 900, output: 65536, totalTokens: 66436 } } });
+    check(await cut().locator('.notice-detail').textContent(), 'Выведено 65\u00a0536 ток.', 'Without calls the plate gives only the output tokens.');
+    check(await run().locator('.reasoning').evaluate(node => [node.classList.contains('truncated'), node.classList.contains('interrupted'), node.dataset.state]), [true, false, 'stopped'], 'The reasoning the stream stopped in is marked cut, not struck out.');
+    check((await run().locator('.reasoning .step-meta').textContent()).endsWith('оборвано'), true, 'The cut reasoning says so.');
+    check(await run().locator('.run-title').textContent(), 'Ответ оборван', 'The card header shows the cut while Pi finishes.');
+    await activity({ type: 'turn_end' });
+    await activity({ type: 'agent_end' });
+    await activity({ type: 'agent_settled', aborted: false });
+    await receive({ type: 'busy', busy: false, canStop: true });
+    check(await run().getAttribute('data-state'), 'truncated', 'A request that ends on a cut response is not an ordinary completion.');
+    check(await run().locator('.run-title').textContent(), 'Ответ оборван', 'The finished card is titled by the cut.');
+    check(await cut().getAttribute('data-outcome'), 'failed', 'The cut the request ended with is final.');
+    check(await background(cut()), await token('--danger-soft'), 'A final cut is red.');
+    check(await run().locator('.text.final, .copy-button').count(), 0, 'A cut request has no final answer to copy.');
+    await page.locator('#conversation').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await page.screenshot({ path: path.join(output, screenshots[14]) });
+    await run().locator('.run-header').click();
+    check(await cut().isVisible(), true, 'The cut stays visible in a collapsed card: it is the outcome.');
+    check(await run().locator('.reasoning').isVisible(), false, 'Collapsing still hides the progress.');
+    await run().locator('.run-header').click();
+    // A cut answer text without usage: only the cut part is marked, no invented token count.
+    await receive({ type: 'message', who: 'Вы', text: 'Опиши допущения подробно.' });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'turn_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await activity({ type: 'message_end', message: { ...modelMessage([{ type: 'thinking', thinking: 'Опишу по разделам.' }, { type: 'text', text: 'Раздел 1. Выручка растёт на' }], 'length'), usage: undefined } });
+    await activity({ type: 'agent_settled', aborted: false });
+    check(await cut().locator('.notice-detail').count(), 0, 'Without usage the plate invents no token count.');
+    check(await run().locator('.reasoning').evaluate(node => node.classList.contains('truncated') || node.dataset.state !== 'done'), false, 'Complete reasoning before the cut text stays ordinary.');
+    check(await run().locator('.step.text').evaluate(node => [node.classList.contains('truncated'), node.classList.contains('final')]), [true, false], 'The cut text is marked and is not a final answer.');
+    check(await run().getAttribute('data-state'), 'truncated', 'A request that ends on a cut text is not an ordinary completion.');
+    // Pi compacts and retries a response cut below the model's limit: the attempt is left out like a failed one.
+    await receive({ type: 'message', who: 'Вы', text: 'Сверь допущения с отчётом.' });
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'turn_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await update({ type: 'thinking_delta', contentIndex: 0, delta: 'Сверяю построчно' });
+    await activity({ type: 'message_end', message: { ...modelMessage([{ type: 'thinking', thinking: 'Сверяю построчно' }], 'length'), usage: { input: 120000, output: 3000, totalTokens: 123000 } } });
+    await activity({ type: 'turn_end' });
+    await activity({ type: 'agent_end' });
+    await activity({ type: 'compaction_start', reason: 'overflow' });
+    await activity({ type: 'compaction_end', reason: 'overflow', result: { summary: 'Сводка.', firstKeptEntryId: 'e1', tokensBefore: 123000 }, aborted: false, willRetry: true });
+    check(await run().locator('.reasoning').evaluate(node => [node.classList.contains('interrupted'), node.classList.contains('truncated')]), [true, false], 'A cut attempt Pi retries is marked interrupted.');
+    check(await run().locator('.reasoning .step-meta').textContent(), 'прервано', 'The retried attempt says it was interrupted.');
+    await activity({ type: 'agent_start' });
+    await activity({ type: 'turn_start' });
+    await activity({ type: 'message_start', message: modelMessage() });
+    await activity({ type: 'message_end', message: modelMessage([{ type: 'text', text: 'Допущения совпадают с отчётом.' }]) });
+    await activity({ type: 'agent_settled', aborted: false });
+    check(await run().getAttribute('data-state'), 'done', 'A cut response recovered by a retry ends the request normally.');
+    check(await cut().getAttribute('data-outcome'), 'retried', 'The recovered cut stays a warning.');
+    check(await timeline(), ['trace:reasoning', 'error', 'trace:compaction', 'text'], 'The cut, the compaction and the retried answer keep their order.');
+    check(await run().locator('.text.final').textContent(), 'Допущения совпадают с отчётом.', 'The retried answer is the final one.');
 
     // ---------------------------------------------------------------- layout
     for (const width of [320, 410, 760]) {

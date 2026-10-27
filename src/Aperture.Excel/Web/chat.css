@@ -290,7 +290,8 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
   white-space: nowrap;
 }
 
-.run[data-state="error"] .run-title { color: var(--danger); }
+.run[data-state="error"] .run-title,
+.run[data-state="truncated"] .run-title { color: var(--danger); }
 .run[data-state="stopped"] .run-title { color: var(--warning); }
 
 .run-meta {
@@ -501,6 +502,8 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 .step.reasoning.interrupted .step-label { text-decoration: line-through; }
 .step.reasoning.interrupted .step-label, .step.reasoning.interrupted .step-context { color: var(--text-3); }
 .step.text.interrupted { color: var(--text-3); }
+/* Reasoning cut at the output limit stays in Pi's context: it is marked, not struck out. */
+.step.reasoning.truncated .step-meta { color: var(--warning); }
 
 .step.error {
   display: flex;
@@ -515,9 +518,9 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible {
 
 .step.error .step-icon { margin-top: 3px; color: var(--danger); }
 .step.error .notice-detail { font-size: 11.5px; }
-/* A provider error Pi may still recover from is a warning until the request ends with it. */
-.step.provider-error:not([data-outcome="failed"]) { background: var(--warning-soft); }
-.step.provider-error:not([data-outcome="failed"]) .step-icon { color: var(--warning); }
+/* A provider error or a cut response Pi may still go on from is a warning until the request ends with it. */
+.step.error[data-outcome]:not([data-outcome="failed"]) { background: var(--warning-soft); }
+.step.error[data-outcome]:not([data-outcome="failed"]) .step-icon { color: var(--warning); }
 
 .spinner {
   display: inline-block;
